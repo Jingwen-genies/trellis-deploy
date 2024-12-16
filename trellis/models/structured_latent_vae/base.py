@@ -13,15 +13,23 @@ def block_attn_config(self):
     """
     for i in range(self.num_blocks):
         if self.attn_mode == "shift_window":
-            yield "serialized", self.window_size, 0, (16 * (i % 2),) * 3, sp.SerializeMode.Z_ORDER
+            yield "serialized", self.window_size, 0, (
+                16 * (i % 2),
+            ) * 3, sp.SerializeMode.Z_ORDER
         elif self.attn_mode == "shift_sequence":
-            yield "serialized", self.window_size, self.window_size // 2 * (i % 2), (0, 0, 0), sp.SerializeMode.Z_ORDER
+            yield "serialized", self.window_size, self.window_size // 2 * (i % 2), (
+                0,
+                0,
+                0,
+            ), sp.SerializeMode.Z_ORDER
         elif self.attn_mode == "shift_order":
             yield "serialized", self.window_size, 0, (0, 0, 0), sp.SerializeModes[i % 4]
         elif self.attn_mode == "full":
             yield "full", None, None, None, None
         elif self.attn_mode == "swin":
-            yield "windowed", self.window_size, None, self.window_size // 2 * (i % 2), None
+            yield "windowed", self.window_size, None, self.window_size // 2 * (
+                i % 2
+            ), None
 
 
 class SparseTransformerBase(nn.Module):
@@ -29,6 +37,7 @@ class SparseTransformerBase(nn.Module):
     Sparse Transformer without output layers.
     Serve as the base class for encoder and decoder.
     """
+
     def __init__(
         self,
         in_channels: int,
@@ -37,7 +46,9 @@ class SparseTransformerBase(nn.Module):
         num_heads: Optional[int] = None,
         num_head_channels: Optional[int] = 64,
         mlp_ratio: float = 4.0,
-        attn_mode: Literal["full", "shift_window", "shift_sequence", "shift_order", "swin"] = "full",
+        attn_mode: Literal[
+            "full", "shift_window", "shift_sequence", "shift_order", "swin"
+        ] = "full",
         window_size: Optional[int] = None,
         pe_mode: Literal["ape", "rope"] = "ape",
         use_fp16: bool = False,
@@ -62,22 +73,26 @@ class SparseTransformerBase(nn.Module):
             self.pos_embedder = AbsolutePositionEmbedder(model_channels)
 
         self.input_layer = sp.SparseLinear(in_channels, model_channels)
-        self.blocks = nn.ModuleList([
-            SparseTransformerBlock(
-                model_channels,
-                num_heads=self.num_heads,
-                mlp_ratio=self.mlp_ratio,
-                attn_mode=attn_mode,
-                window_size=window_size,
-                shift_sequence=shift_sequence,
-                shift_window=shift_window,
-                serialize_mode=serialize_mode,
-                use_checkpoint=self.use_checkpoint,
-                use_rope=(pe_mode == "rope"),
-                qk_rms_norm=self.qk_rms_norm,
-            )
-            for attn_mode, window_size, shift_sequence, shift_window, serialize_mode in block_attn_config(self)
-        ])
+        self.blocks = nn.ModuleList(
+            [
+                SparseTransformerBlock(
+                    model_channels,
+                    num_heads=self.num_heads,
+                    mlp_ratio=self.mlp_ratio,
+                    attn_mode=attn_mode,
+                    window_size=window_size,
+                    shift_sequence=shift_sequence,
+                    shift_window=shift_window,
+                    serialize_mode=serialize_mode,
+                    use_checkpoint=self.use_checkpoint,
+                    use_rope=(pe_mode == "rope"),
+                    qk_rms_norm=self.qk_rms_norm,
+                )
+                for attn_mode, window_size, shift_sequence, shift_window, serialize_mode in block_attn_config(
+                    self
+                )
+            ]
+        )
 
     @property
     def device(self) -> torch.device:
@@ -105,6 +120,7 @@ class SparseTransformerBase(nn.Module):
                 torch.nn.init.xavier_uniform_(module.weight)
                 if module.bias is not None:
                     nn.init.constant_(module.bias, 0)
+
         self.apply(_basic_init)
 
     def forward(self, x: sp.SparseTensor) -> sp.SparseTensor:

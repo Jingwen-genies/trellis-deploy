@@ -4,7 +4,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from ..modules.utils import convert_module_to_f16, convert_module_to_f32
-from ..modules.transformer import AbsolutePositionEmbedder, ModulatedTransformerCrossBlock
+from ..modules.transformer import (
+    AbsolutePositionEmbedder,
+    ModulatedTransformerCrossBlock,
+)
 from ..modules.spatial import patchify, unpatchify
 
 
@@ -12,6 +15,7 @@ class TimestepEmbedder(nn.Module):
     """
     Embeds scalar timesteps into vector representations.
     """
+
     def __init__(self, hidden_size, frequency_embedding_size=256):
         super().__init__()
         self.mlp = nn.Sequential(
@@ -38,12 +42,16 @@ class TimestepEmbedder(nn.Module):
         # https://github.com/openai/glide-text2im/blob/main/glide_text2im/nn.py
         half = dim // 2
         freqs = torch.exp(
-            -np.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32) / half
+            -np.log(max_period)
+            * torch.arange(start=0, end=half, dtype=torch.float32)
+            / half
         ).to(device=t.device)
         args = t[:, None].float() * freqs[None]
         embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
         if dim % 2:
-            embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
+            embedding = torch.cat(
+                [embedding, torch.zeros_like(embedding[:, :1])], dim=-1
+            )
         return embedding
 
     def forward(self, t):
@@ -93,34 +101,41 @@ class SparseStructureFlowModel(nn.Module):
         self.t_embedder = TimestepEmbedder(model_channels)
         if share_mod:
             self.adaLN_modulation = nn.Sequential(
-                nn.SiLU(),
-                nn.Linear(model_channels, 6 * model_channels, bias=True)
+                nn.SiLU(), nn.Linear(model_channels, 6 * model_channels, bias=True)
             )
 
         if pe_mode == "ape":
             pos_embedder = AbsolutePositionEmbedder(model_channels, 3)
-            coords = torch.meshgrid(*[torch.arange(res, device=self.device) for res in [resolution // patch_size] * 3], indexing='ij')
+            coords = torch.meshgrid(
+                *[
+                    torch.arange(res, device=self.device)
+                    for res in [resolution // patch_size] * 3
+                ],
+                indexing="ij",
+            )
             coords = torch.stack(coords, dim=-1).reshape(-1, 3)
             pos_emb = pos_embedder(coords)
             self.register_buffer("pos_emb", pos_emb)
 
         self.input_layer = nn.Linear(in_channels * patch_size**3, model_channels)
-            
-        self.blocks = nn.ModuleList([
-            ModulatedTransformerCrossBlock(
-                model_channels,
-                cond_channels,
-                num_heads=self.num_heads,
-                mlp_ratio=self.mlp_ratio,
-                attn_mode='full',
-                use_checkpoint=self.use_checkpoint,
-                use_rope=(pe_mode == "rope"),
-                share_mod=share_mod,
-                qk_rms_norm=self.qk_rms_norm,
-                qk_rms_norm_cross=self.qk_rms_norm_cross,
-            )
-            for _ in range(num_blocks)
-        ])
+
+        self.blocks = nn.ModuleList(
+            [
+                ModulatedTransformerCrossBlock(
+                    model_channels,
+                    cond_channels,
+                    num_heads=self.num_heads,
+                    mlp_ratio=self.mlp_ratio,
+                    attn_mode="full",
+                    use_checkpoint=self.use_checkpoint,
+                    use_rope=(pe_mode == "rope"),
+                    share_mod=share_mod,
+                    qk_rms_norm=self.qk_rms_norm,
+                    qk_rms_norm_cross=self.qk_rms_norm_cross,
+                )
+                for _ in range(num_blocks)
+            ]
+        )
 
         self.out_layer = nn.Linear(model_channels, out_channels * patch_size**3)
 
@@ -154,6 +169,7 @@ class SparseStructureFlowModel(nn.Module):
                 torch.nn.init.xavier_uniform_(module.weight)
                 if module.bias is not None:
                     nn.init.constant_(module.bias, 0)
+
         self.apply(_basic_init)
 
         # Initialize timestep embedding MLP:
@@ -173,9 +189,14 @@ class SparseStructureFlowModel(nn.Module):
         nn.init.constant_(self.out_layer.weight, 0)
         nn.init.constant_(self.out_layer.bias, 0)
 
-    def forward(self, x: torch.Tensor, t: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
-        assert [*x.shape] == [x.shape[0], self.in_channels, *[self.resolution] * 3], \
-                f"Input shape mismatch, got {x.shape}, expected {[x.shape[0], self.in_channels, *[self.resolution] * 3]}"
+    def forward(
+        self, x: torch.Tensor, t: torch.Tensor, cond: torch.Tensor
+    ) -> torch.Tensor:
+        assert [*x.shape] == [
+            x.shape[0],
+            self.in_channels,
+            *[self.resolution] * 3,
+        ], f"Input shape mismatch, got {x.shape}, expected {[x.shape[0], self.in_channels, *[self.resolution] * 3]}"
 
         h = patchify(x, self.patch_size)
         h = h.view(*h.shape[:2], -1).permute(0, 2, 1).contiguous()
@@ -194,7 +215,9 @@ class SparseStructureFlowModel(nn.Module):
         h = F.layer_norm(h, h.shape[-1:])
         h = self.out_layer(h)
 
-        h = h.permute(0, 2, 1).view(h.shape[0], h.shape[2], *[self.resolution // self.patch_size] * 3)
+        h = h.permute(0, 2, 1).view(
+            h.shape[0], h.shape[2], *[self.resolution // self.patch_size] * 3
+        )
         h = unpatchify(h, self.patch_size).contiguous()
 
         return h

@@ -1,248 +1,457 @@
-import gradio as gr
-from gradio_litmodel3d import LitModel3D
-
+from flask import Flask, request, jsonify, send_file
 import os
-from typing import *
-import torch
-import numpy as np
-import imageio
-import uuid
-from easydict import EasyDict as edict
 from PIL import Image
+import uuid
+from threading import Thread
 from trellis.pipelines import TrellisImageTo3DPipeline
-from trellis.representations import Gaussian, MeshExtractResult
-from trellis.utils import render_utils, postprocessing_utils
+from trellis.utils import postprocessing_utils
+import time
+import numpy as np
+import json
+import shutil
+import warnings
+import tempfile
+from storage import get_storage_provider
 
+# Ignore xFormers warnings
+warnings.filterwarnings("ignore", message=".*xFormers is available.*")
+warnings.filterwarnings("ignore", category=UserWarning, module="dinov2.layers")
 
-MAX_SEED = np.iinfo(np.int32).max
-TMP_DIR = "/tmp/Trellis-demo"
+app = Flask(__name__)
 
-os.makedirs(TMP_DIR, exist_ok=True)
+# Constants
+TEMP_DIR = tempfile.gettempdir()  # Use system temp directory
+IMAGES_DIR = os.path.join(TEMP_DIR, "input_images")  # For temporary uploaded images
+TASKS_DIR = os.path.join(TEMP_DIR, "output_tasks")   # For temporary task-specific data
+TASK_STATUS = {}  # Store task status
+MAX_SEED = 2**32 - 1
 
+# Initialize storage provider
+storage = get_storage_provider()
 
-def preprocess_image(image: Image.Image) -> Tuple[str, Image.Image]:
-    """
-    Preprocess the input image.
+# Initialize the pipeline
+pipeline = TrellisImageTo3DPipeline.from_pretrained("JeffreyXiang/TRELLIS-image-large")
+pipeline.cuda()
 
-    Args:
-        image (Image.Image): The input image.
+# Create directories if they don't exist
+os.makedirs(IMAGES_DIR, exist_ok=True)
+os.makedirs(TASKS_DIR, exist_ok=True)
 
-    Returns:
-        str: uuid of the trial.
-        Image.Image: The preprocessed image.
-    """
-    trial_id = str(uuid.uuid4())
-    processed_image = pipeline.preprocess_image(image)
-    processed_image.save(f"{TMP_DIR}/{trial_id}.png")
-    return trial_id, processed_image
+def get_task_dir(task_id: str) -> str:
+    """Get task-specific directory and create if it doesn't exist"""
+    task_dir = os.path.join(TASKS_DIR, task_id)
+    os.makedirs(task_dir, exist_ok=True)
+    return task_dir
 
+def save_task_metadata(task_id: str, metadata: dict):
+    """Save task metadata to task directory and S3"""
+    task_dir = get_task_dir(task_id)
+    metadata_path = os.path.join(task_dir, 'metadata.json')
+    
+    # Save locally first
+    with open(metadata_path, 'w') as f:
+        json.dump(metadata, f)
+    
+    # Upload to S3
+    s3_path = f"tasks/{task_id}/metadata.json"
+    storage.upload_file(metadata_path, s3_path)
 
-def pack_state(gs: Gaussian, mesh: MeshExtractResult, trial_id: str) -> dict:
-    return {
-        'gaussian': {
-            **gs.init_params,
-            '_xyz': gs._xyz.cpu().numpy(),
-            '_features_dc': gs._features_dc.cpu().numpy(),
-            '_scaling': gs._scaling.cpu().numpy(),
-            '_rotation': gs._rotation.cpu().numpy(),
-            '_opacity': gs._opacity.cpu().numpy(),
+def process_task(task_id: str, image_path: str, params: dict):
+    """Background task processor in a different thread with given task_id"""
+    task_dir = get_task_dir(task_id)
+    
+    try:
+        TASK_STATUS[task_id]['status'] = 'processing'
+        TASK_STATUS[task_id]['progress'] = 10
+        
+        # Copy input image to task directory
+        task_image_path = os.path.join(task_dir, 'input.png')
+        shutil.copy2(image_path, task_image_path)
+        
+        # Save task parameters and upload to S3
+        params_path = os.path.join(task_dir, 'params.json')
+        with open(params_path, 'w') as f:
+            json.dump(params, f)
+        storage.upload_file(params_path, f"tasks/{task_id}/params.json")
+        
+        # Load and process image
+        image = Image.open(task_image_path)
+        
+        # Run the pipeline with all parameters
+        outputs = pipeline.run(
+            image,
+            seed=params.get('geometry_seed', 42),
+            formats=["gaussian", "mesh"],
+            preprocess_image=True,
+            sparse_structure_sampler_params={
+                "steps": params.get('sparse_structure_steps', 12),
+                "cfg_strength": params.get('sparse_structure_strength', 7.5),
+            },
+            slat_sampler_params={
+                "steps": params.get('slat_steps', 12),
+                "cfg_strength": params.get('slat_strength', 3.0),
+            },
+        )
+        
+        TASK_STATUS[task_id]['progress'] = 70
+        
+        # Extract GLB with texture settings
+        glb = postprocessing_utils.to_glb(
+            outputs["gaussian"][0],
+            outputs["mesh"][0],
+            simplify=0.95,  # Fixed ratio as per example
+            texture_size=1024,  # Fixed size as per example
+            verbose=False
+        )
+        
+        # Save GLB locally first
+        glb_path = os.path.join(task_dir, 'model.glb')
+        glb.export(glb_path)
+        
+        # Upload GLB to S3
+        s3_path = f"tasks/{task_id}/model.glb"
+        s3_url = storage.upload_file(glb_path, s3_path)
+        
+        # Update task status with S3 URL
+        TASK_STATUS[task_id]['status'] = 'completed'
+        TASK_STATUS[task_id]['progress'] = 100
+        TASK_STATUS[task_id]['output'] = {
+            'model': s3_url  # Store the S3 URL directly
+        }
+        
+        # Save final status to task directory and S3
+        save_task_metadata(task_id, TASK_STATUS[task_id])
+        
+        # Clean up local files
+        shutil.rmtree(task_dir)
+        
+    except Exception as e:
+        TASK_STATUS[task_id]['status'] = 'failed'
+        TASK_STATUS[task_id]['error'] = str(e)
+        save_task_metadata(task_id, TASK_STATUS[task_id])
+        # Clean up local files
+        if os.path.exists(task_dir):
+            shutil.rmtree(task_dir)
+
+@app.route('/trellis/upload', methods=['POST'])
+def upload_image():
+    if 'file' not in request.files:
+        return jsonify({
+            'code': 2003,
+            'data': {
+                'message': 'No file provided'
+            }
+        }), 400
+    
+    try:
+        file = request.files['file']
+        
+        # Try to open and validate image
+        try:
+            image = Image.open(file.stream)
+            
+            # Check if format is supported
+            if image.format.lower() not in ['jpeg', 'jpg', 'png']:
+                return jsonify({
+                    'code': 2004,
+                    'data': {
+                        'message': 'Unsupported file type. Only JPEG and PNG are supported'
+                    }
+                }), 400
+                
+            image.verify()  # Verify it's actually an image
+            file.stream.seek(0)  # Reset file pointer after verify
+            image = Image.open(file.stream)  # Reopen for actual processing
+            
+        except Exception:
+            return jsonify({
+                'code': 2004,
+                'data': {
+                    'message': 'Invalid image file'
+                }
+            }), 400
+            
+        # Get image info
+        width, height = image.size
+        file.stream.seek(0)  # Reset file pointer after reading
+        file_content = file.read()
+        file_size = len(file_content)
+        
+        # Generate token and save file
+        image_token = str(uuid.uuid4())
+        temp_path = os.path.join(IMAGES_DIR, f"{image_token}.png")
+        
+        # Save file locally first
+        with open(temp_path, 'wb') as f:
+            f.write(file_content)
+            
+        # Upload to S3
+        s3_path = f"images/{image_token}.png"
+        storage.upload_file(temp_path, s3_path)
+        
+        # Clean up local file
+        os.remove(temp_path)
+        
+        return jsonify({
+            'code': 0,
+            'data': {
+                'message': 'Image uploaded successfully',
+                'image_token': image_token,
+                'type': 'image',
+                'size': file_size,
+                'width': width,
+                'height': height
+            }
+        }), 200
+        
+    except Exception as e:
+        return jsonify({
+            'code': 500,
+            'data': {
+                'message': f'Internal server error: {str(e)}'
+            }
+        }), 500
+
+@app.route('/trellis/task', methods=['POST'])
+def create_task():
+    """Create processing task endpoint
+    accept payload like:
+    {
+        "type": "image_to_model",
+        "model_version": "default",
+        "file": {
+            "type": "image",
+            "file_token": "your_image_token"
         },
-        'mesh': {
-            'vertices': mesh.vertices.cpu().numpy(),
-            'faces': mesh.faces.cpu().numpy(),
-        },
-        'trial_id': trial_id,
+        "face_limit": 10000,
+        "texture": true,
+        "pbr": true,
+        "texture_seed": 0,
+        "geometry_seed": 0,
+        "sparse_structure_steps": 12,      # Optional: Number of steps for sparse structure generation (default: 12)
+        "sparse_structure_strength": 7.5,   # Optional: Guidance strength for sparse structure (default: 7.5)
+        "slat_steps": 12,                  # Optional: Number of steps for SLAT generation (default: 12)
+        "slat_strength": 3.0               # Optional: Guidance strength for SLAT (default: 3.0)
+    }
+    """
+    data = request.json
+    if not data:
+        return jsonify({
+            'code': 2002,
+            'data': {
+                'message': 'Invalid request format'
+            }
+        }), 400
+        
+    # Validate payload structure
+    if data.get('type') != 'image_to_model':
+        return jsonify({
+            'code': 2002,
+            'data': {
+                'message': 'Invalid task type'
+            }
+        }), 400
+        
+    if not data.get('file'):
+        return jsonify({
+            'code': 2003,
+            'data': {
+                'message': 'File information missing'
+            }
+        }), 400
+    
+    if not data['file'].get('type') not in ['png', 'jpeg', 'jpg']:
+        return jsonify({
+            'code': 2004,
+            'data': {
+                'message': 'Unsupported file type'
+            }
+        }), 400
+        
+    # Get file token (equivalent to our image_id)
+    file_token = data['file'].get('file_token')
+    if not file_token:
+        return jsonify({
+            'code': 2003,
+            'data': {
+                'message': 'File token missing'
+            }
+        }), 400
+    
+    # Check if image exists
+    image_path = os.path.join(IMAGES_DIR, f"{file_token}.png")
+    if not os.path.exists(image_path):
+        return jsonify({
+            'code': 2003,
+            'data': {
+                'message': 'Image not found'
+            }
+        }), 404
+    
+    # Validate and extract parameters with defaults
+    try:
+        face_limit = int(data.get('face_limit', 10000))
+        if face_limit <= 0:
+            raise ValueError("face_limit must be positive")
+            
+        texture_seed = int(data.get('texture_seed', 0))
+        geometry_seed = int(data.get('geometry_seed', 0))
+        
+        if texture_seed < 0 or texture_seed > MAX_SEED:
+            raise ValueError(f"texture_seed must be between 0 and {MAX_SEED}")
+        if geometry_seed < 0 or geometry_seed > MAX_SEED:
+            raise ValueError(f"geometry_seed must be between 0 and {MAX_SEED}")
+            
+        # Validate sampling parameters
+        sparse_structure_steps = int(data.get('sparse_structure_steps', 20))
+        sparse_structure_strength = float(data.get('sparse_structure_strength', 7.5))
+        slat_steps = int(data.get('slat_steps', 20))
+        slat_strength = float(data.get('slat_strength', 3.0))
+        
+        if sparse_structure_steps < 1:
+            raise ValueError("sparse_structure_steps must be positive")
+        if slat_steps < 1:
+            raise ValueError("slat_steps must be positive")
+        if sparse_structure_strength <= 0:
+            raise ValueError("sparse_structure_strength must be positive")
+        if slat_strength <= 0:
+            raise ValueError("slat_strength must be positive")
+            
+    except (ValueError, TypeError) as e:
+        return jsonify({
+            'code': 2005,
+            'data': {
+                'message': f'Invalid parameter value: {str(e)}'
+            }
+        }), 400
+    
+    # Extract parameters
+    params = {
+        'file_token': file_token,
+        'model_version': data.get('model_version', 'default'),
+        'face_limit': face_limit,
+        'texture': bool(data.get('texture', True)),
+        'pbr': bool(data.get('pbr', True)),
+        'texture_seed': texture_seed,
+        'geometry_seed': geometry_seed,
+        'sparse_structure_steps': sparse_structure_steps,
+        'sparse_structure_strength': sparse_structure_strength,
+        'slat_steps': slat_steps,
+        'slat_strength': slat_strength
     }
     
+    # Create task
+    task_id = str(uuid.uuid4())
+    TASK_STATUS[task_id] = {
+        'status': 'pending',
+        'progress': 0,
+        'created_at': time.time(),
+        'params': params
+    }
     
-def unpack_state(state: dict) -> Tuple[Gaussian, edict, str]:
-    gs = Gaussian(
-        aabb=state['gaussian']['aabb'],
-        sh_degree=state['gaussian']['sh_degree'],
-        mininum_kernel_size=state['gaussian']['mininum_kernel_size'],
-        scaling_bias=state['gaussian']['scaling_bias'],
-        opacity_bias=state['gaussian']['opacity_bias'],
-        scaling_activation=state['gaussian']['scaling_activation'],
-    )
-    gs._xyz = torch.tensor(state['gaussian']['_xyz'], device='cuda')
-    gs._features_dc = torch.tensor(state['gaussian']['_features_dc'], device='cuda')
-    gs._scaling = torch.tensor(state['gaussian']['_scaling'], device='cuda')
-    gs._rotation = torch.tensor(state['gaussian']['_rotation'], device='cuda')
-    gs._opacity = torch.tensor(state['gaussian']['_opacity'], device='cuda')
+    # Start background processing
+    thread = Thread(target=process_task, args=(task_id, image_path, params))
+    thread.start()
     
-    mesh = edict(
-        vertices=torch.tensor(state['mesh']['vertices'], device='cuda'),
-        faces=torch.tensor(state['mesh']['faces'], device='cuda'),
-    )
-    
-    return gs, mesh, state['trial_id']
+    return jsonify({
+        'code': 0,
+        'data': {
+            'message': 'Task created successfully',
+            'task_id': task_id,
+            'status': 'pending',
+            'params': params
+        }
+    }), 200
 
-
-def image_to_3d(trial_id: str, seed: int, randomize_seed: bool, ss_guidance_strength: float, ss_sampling_steps: int, slat_guidance_strength: float, slat_sampling_steps: int) -> Tuple[dict, str]:
+@app.route('/trellis/task/<task_id>', methods=['GET'])
+def get_task_status(task_id):
+    """Get task status endpoint
+    
+    Response format:
+    {
+        "code": 0,
+        "data": {
+            "task_id": "unique-uuid",
+            "type": "image_to_model",
+            "status": "running/success/failed/etc",
+            "input": {
+                "file_token": "image-token",
+                "model_version": "version",
+                "face_limit": 10000,
+                "texture": true,
+                "pbr": true,
+                "texture_seed": 0,
+                "geometry_seed": 0
+            },
+            "output": {},  # Will contain URLs when completed
+            "progress": 0-100,
+            "create_time": timestamp
+        }
+    }
     """
-    Convert an image to a 3D model.
-
-    Args:
-        trial_id (str): The uuid of the trial.
-        seed (int): The random seed.
-        randomize_seed (bool): Whether to randomize the seed.
-        ss_guidance_strength (float): The guidance strength for sparse structure generation.
-        ss_sampling_steps (int): The number of sampling steps for sparse structure generation.
-        slat_guidance_strength (float): The guidance strength for structured latent generation.
-        slat_sampling_steps (int): The number of sampling steps for structured latent generation.
-
-    Returns:
-        dict: The information of the generated 3D model.
-        str: The path to the video of the 3D model.
-    """
-    if randomize_seed:
-        seed = np.random.randint(0, MAX_SEED)
-    outputs = pipeline.run(
-        Image.open(f"{TMP_DIR}/{trial_id}.png"),
-        seed=seed,
-        formats=["gaussian", "mesh"],
-        preprocess_image=False,
-        sparse_structure_sampler_params={
-            "steps": ss_sampling_steps,
-            "cfg_strength": ss_guidance_strength,
-        },
-        slat_sampler_params={
-            "steps": slat_sampling_steps,
-            "cfg_strength": slat_guidance_strength,
-        },
-    )
-    video = render_utils.render_video(outputs['gaussian'][0], num_frames=120)['color']
-    video_geo = render_utils.render_video(outputs['mesh'][0], num_frames=120)['normal']
-    video = [np.concatenate([video[i], video_geo[i]], axis=1) for i in range(len(video))]
-    trial_id = uuid.uuid4()
-    video_path = f"{TMP_DIR}/{trial_id}.mp4"
-    imageio.mimsave(video_path, video, fps=15)
-    state = pack_state(outputs['gaussian'][0], outputs['mesh'][0], trial_id)
-    return state, video_path
-
-
-def extract_glb(state: dict, mesh_simplify: float, texture_size: int) -> Tuple[str, str]:
-    """
-    Extract a GLB file from the 3D model.
-
-    Args:
-        state (dict): The state of the generated 3D model.
-        mesh_simplify (float): The mesh simplification factor.
-        texture_size (int): The texture resolution.
-
-    Returns:
-        str: The path to the extracted GLB file.
-    """
-    gs, mesh, trial_id = unpack_state(state)
-    glb = postprocessing_utils.to_glb(gs, mesh, simplify=mesh_simplify, texture_size=texture_size, verbose=False)
-    glb_path = f"{TMP_DIR}/{trial_id}.glb"
-    glb.export(glb_path)
-    return glb_path, glb_path
-
-
-def activate_button() -> gr.Button:
-    return gr.Button(interactive=True)
-
-
-def deactivate_button() -> gr.Button:
-    return gr.Button(interactive=False)
-
-
-with gr.Blocks() as demo:
-    gr.Markdown("""
-    ## Image to 3D Asset with [TRELLIS](https://trellis3d.github.io/)
-    * Upload an image and click "Generate" to create a 3D asset. If the image has alpha channel, it be used as the mask. Otherwise, we use `rembg` to remove the background.
-    * If you find the generated 3D asset satisfactory, click "Extract GLB" to extract the GLB file and download it.
-    """)
+    if task_id not in TASK_STATUS:
+        return jsonify({
+            'code': 2001,
+            'data': {
+                'message': 'Task not found'
+            }
+        }), 404
     
-    with gr.Row():
-        with gr.Column():
-            image_prompt = gr.Image(label="Image Prompt", image_mode="RGBA", type="pil", height=300)
-            
-            with gr.Accordion(label="Generation Settings", open=False):
-                seed = gr.Slider(0, MAX_SEED, label="Seed", value=0, step=1)
-                randomize_seed = gr.Checkbox(label="Randomize Seed", value=True)
-                gr.Markdown("Stage 1: Sparse Structure Generation")
-                with gr.Row():
-                    ss_guidance_strength = gr.Slider(0.0, 10.0, label="Guidance Strength", value=7.5, step=0.1)
-                    ss_sampling_steps = gr.Slider(1, 50, label="Sampling Steps", value=12, step=1)
-                gr.Markdown("Stage 2: Structured Latent Generation")
-                with gr.Row():
-                    slat_guidance_strength = gr.Slider(0.0, 10.0, label="Guidance Strength", value=3.0, step=0.1)
-                    slat_sampling_steps = gr.Slider(1, 50, label="Sampling Steps", value=12, step=1)
-
-            generate_btn = gr.Button("Generate")
-            
-            with gr.Accordion(label="GLB Extraction Settings", open=False):
-                mesh_simplify = gr.Slider(0.9, 0.98, label="Simplify", value=0.95, step=0.01)
-                texture_size = gr.Slider(512, 2048, label="Texture Size", value=1024, step=512)
-            
-            extract_glb_btn = gr.Button("Extract GLB", interactive=False)
-
-        with gr.Column():
-            video_output = gr.Video(label="Generated 3D Asset", autoplay=True, loop=True, height=300)
-            model_output = LitModel3D(label="Extracted GLB", exposure=20.0, height=300)
-            download_glb = gr.DownloadButton(label="Download GLB", interactive=False)
-            
-    trial_id = gr.Textbox(visible=False)
-    output_buf = gr.State()
-
-    # Example images at the bottom of the page
-    with gr.Row():
-        examples = gr.Examples(
-            examples=[
-                f'assets/example_image/{image}'
-                for image in os.listdir("assets/example_image")
-            ],
-            inputs=[image_prompt],
-            fn=preprocess_image,
-            outputs=[trial_id, image_prompt],
-            run_on_click=True,
-            examples_per_page=64,
-        )
-
-    # Handlers
-    image_prompt.upload(
-        preprocess_image,
-        inputs=[image_prompt],
-        outputs=[trial_id, image_prompt],
-    )
-    image_prompt.clear(
-        lambda: '',
-        outputs=[trial_id],
-    )
-
-    generate_btn.click(
-        image_to_3d,
-        inputs=[trial_id, seed, randomize_seed, ss_guidance_strength, ss_sampling_steps, slat_guidance_strength, slat_sampling_steps],
-        outputs=[output_buf, video_output],
-    ).then(
-        activate_button,
-        outputs=[extract_glb_btn],
-    )
-
-    video_output.clear(
-        deactivate_button,
-        outputs=[extract_glb_btn],
-    )
-
-    extract_glb_btn.click(
-        extract_glb,
-        inputs=[output_buf, mesh_simplify, texture_size],
-        outputs=[model_output, download_glb],
-    ).then(
-        activate_button,
-        outputs=[download_glb],
-    )
-
-    model_output.clear(
-        deactivate_button,
-        outputs=[download_glb],
-    )
+    status_data = TASK_STATUS[task_id].copy()
     
+    # Map internal status to API status
+    status_mapping = {
+        'pending': 'queued',
+        'processing': 'running',
+        'completed': 'success',
+        'failed': 'failed'
+    }
+    
+    # Generate full URL using request's host if task is completed
+    if status_data['status'] == 'completed' and 'output' in status_data:
+        model_path = status_data['output']['model']
+        # Use request's host and scheme for URL
+        base_url = request.host_url.rstrip('/')
+        status_data['output']['model'] = f"{base_url}/files/{model_path}"
+    
+    # Prepare response data
+    response_data = {
+        'message': f"Task is {status_mapping.get(status_data['status'], 'unknown')}",
+        'task_id': task_id,
+        'type': 'image_to_model',
+        'status': status_mapping.get(status_data['status'], 'unknown'),
+        'input': status_data['params'],
+        'output': status_data.get('output', {}),
+        'progress': status_data['progress'],
+        'create_time': int(status_data['created_at'])
+    }
+    
+    # Add error information if task failed
+    if status_data['status'] == 'failed':
+        response_data['error'] = status_data.get('error', 'Unknown error')
+        response_data['message'] = f"Task failed: {status_data.get('error', 'Unknown error')}"
+    
+    return jsonify({
+        'code': 0,
+        'data': response_data
+    }), 200
 
-# Launch the Gradio app
-if __name__ == "__main__":
-    pipeline = TrellisImageTo3DPipeline.from_pretrained("JeffreyXiang/TRELLIS-image-large")
-    pipeline.cuda()
-    demo.launch()
+# Update cleanup function to clean S3 objects
+def cleanup_temp_files():
+    """Clean up files older than 1 hour from S3"""
+    # Implementation depends on your S3 cleanup requirements
+    pass
+
+# Add periodic cleanup (every hour)
+def start_cleanup_scheduler():
+    while True:
+        cleanup_temp_files()
+        time.sleep(3600)  # Sleep for 1 hour
+
+# Start cleanup thread when app starts
+cleanup_thread = Thread(target=start_cleanup_scheduler, daemon=True)
+cleanup_thread.start()
+
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)

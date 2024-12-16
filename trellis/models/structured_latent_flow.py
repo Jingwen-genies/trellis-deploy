@@ -26,18 +26,26 @@ class SparseResBlock3d(nn.Module):
         self.out_channels = out_channels or channels
         self.downsample = downsample
         self.upsample = upsample
-        
-        assert not (downsample and upsample), "Cannot downsample and upsample at the same time"
+
+        assert not (
+            downsample and upsample
+        ), "Cannot downsample and upsample at the same time"
 
         self.norm1 = LayerNorm32(channels, elementwise_affine=True, eps=1e-6)
         self.norm2 = LayerNorm32(self.out_channels, elementwise_affine=False, eps=1e-6)
         self.conv1 = sp.SparseConv3d(channels, self.out_channels, 3)
-        self.conv2 = zero_module(sp.SparseConv3d(self.out_channels, self.out_channels, 3))
+        self.conv2 = zero_module(
+            sp.SparseConv3d(self.out_channels, self.out_channels, 3)
+        )
         self.emb_layers = nn.Sequential(
             nn.SiLU(),
             nn.Linear(emb_channels, 2 * self.out_channels, bias=True),
         )
-        self.skip_connection = sp.SparseLinear(channels, self.out_channels) if channels != self.out_channels else nn.Identity()
+        self.skip_connection = (
+            sp.SparseLinear(channels, self.out_channels)
+            if channels != self.out_channels
+            else nn.Identity()
+        )
         self.updown = None
         if self.downsample:
             self.updown = sp.SparseDownsample(2)
@@ -63,7 +71,7 @@ class SparseResBlock3d(nn.Module):
         h = h + self.skip_connection(x)
 
         return h
-    
+
 
 class SLatFlowModel(nn.Module):
     def __init__(
@@ -109,14 +117,17 @@ class SLatFlowModel(nn.Module):
         self.qk_rms_norm_cross = qk_rms_norm_cross
         self.dtype = torch.float16 if use_fp16 else torch.float32
 
-        assert int(np.log2(patch_size)) == np.log2(patch_size), "Patch size must be a power of 2"
-        assert np.log2(patch_size) == len(io_block_channels), "Number of IO ResBlocks must match the number of stages"
+        assert int(np.log2(patch_size)) == np.log2(
+            patch_size
+        ), "Patch size must be a power of 2"
+        assert np.log2(patch_size) == len(
+            io_block_channels
+        ), "Number of IO ResBlocks must match the number of stages"
 
         self.t_embedder = TimestepEmbedder(model_channels)
         if share_mod:
             self.adaLN_modulation = nn.Sequential(
-                nn.SiLU(),
-                nn.Linear(model_channels, 6 * model_channels, bias=True)
+                nn.SiLU(), nn.Linear(model_channels, 6 * model_channels, bias=True)
             )
 
         if pe_mode == "ape":
@@ -124,15 +135,19 @@ class SLatFlowModel(nn.Module):
 
         self.input_layer = sp.SparseLinear(in_channels, io_block_channels[0])
         self.input_blocks = nn.ModuleList([])
-        for chs, next_chs in zip(io_block_channels, io_block_channels[1:] + [model_channels]):
-            self.input_blocks.extend([
-                SparseResBlock3d(
-                    chs,
-                    model_channels,
-                    out_channels=chs,
-                )
-                for _ in range(num_io_res_blocks-1)
-            ])
+        for chs, next_chs in zip(
+            io_block_channels, io_block_channels[1:] + [model_channels]
+        ):
+            self.input_blocks.extend(
+                [
+                    SparseResBlock3d(
+                        chs,
+                        model_channels,
+                        out_channels=chs,
+                    )
+                    for _ in range(num_io_res_blocks - 1)
+                ]
+            )
             self.input_blocks.append(
                 SparseResBlock3d(
                     chs,
@@ -141,25 +156,30 @@ class SLatFlowModel(nn.Module):
                     downsample=True,
                 )
             )
-            
-        self.blocks = nn.ModuleList([
-            ModulatedSparseTransformerCrossBlock(
-                model_channels,
-                cond_channels,
-                num_heads=self.num_heads,
-                mlp_ratio=self.mlp_ratio,
-                attn_mode='full',
-                use_checkpoint=self.use_checkpoint,
-                use_rope=(pe_mode == "rope"),
-                share_mod=self.share_mod,
-                qk_rms_norm=self.qk_rms_norm,
-                qk_rms_norm_cross=self.qk_rms_norm_cross,
-            )
-            for _ in range(num_blocks)
-        ])
+
+        self.blocks = nn.ModuleList(
+            [
+                ModulatedSparseTransformerCrossBlock(
+                    model_channels,
+                    cond_channels,
+                    num_heads=self.num_heads,
+                    mlp_ratio=self.mlp_ratio,
+                    attn_mode="full",
+                    use_checkpoint=self.use_checkpoint,
+                    use_rope=(pe_mode == "rope"),
+                    share_mod=self.share_mod,
+                    qk_rms_norm=self.qk_rms_norm,
+                    qk_rms_norm_cross=self.qk_rms_norm_cross,
+                )
+                for _ in range(num_blocks)
+            ]
+        )
 
         self.out_blocks = nn.ModuleList([])
-        for chs, prev_chs in zip(reversed(io_block_channels), [model_channels] + list(reversed(io_block_channels[1:]))):
+        for chs, prev_chs in zip(
+            reversed(io_block_channels),
+            [model_channels] + list(reversed(io_block_channels[1:])),
+        ):
             self.out_blocks.append(
                 SparseResBlock3d(
                     prev_chs * 2 if self.use_skip_connection else prev_chs,
@@ -168,14 +188,16 @@ class SLatFlowModel(nn.Module):
                     upsample=True,
                 )
             )
-            self.out_blocks.extend([
-                SparseResBlock3d(
-                    chs * 2 if self.use_skip_connection else chs,
-                    model_channels,
-                    out_channels=chs,
-                )
-                for _ in range(num_io_res_blocks-1)
-            ])
+            self.out_blocks.extend(
+                [
+                    SparseResBlock3d(
+                        chs * 2 if self.use_skip_connection else chs,
+                        model_channels,
+                        out_channels=chs,
+                    )
+                    for _ in range(num_io_res_blocks - 1)
+                ]
+            )
         self.out_layer = sp.SparseLinear(io_block_channels[0], out_channels)
 
         self.initialize_weights()
@@ -212,6 +234,7 @@ class SLatFlowModel(nn.Module):
                 torch.nn.init.xavier_uniform_(module.weight)
                 if module.bias is not None:
                     nn.init.constant_(module.bias, 0)
+
         self.apply(_basic_init)
 
         # Initialize timestep embedding MLP:
@@ -231,7 +254,9 @@ class SLatFlowModel(nn.Module):
         nn.init.constant_(self.out_layer.weight, 0)
         nn.init.constant_(self.out_layer.bias, 0)
 
-    def forward(self, x: sp.SparseTensor, t: torch.Tensor, cond: torch.Tensor) -> sp.SparseTensor:
+    def forward(
+        self, x: sp.SparseTensor, t: torch.Tensor, cond: torch.Tensor
+    ) -> sp.SparseTensor:
         h = self.input_layer(x).type(self.dtype)
         t_emb = self.t_embedder(t)
         if self.share_mod:
@@ -244,7 +269,7 @@ class SLatFlowModel(nn.Module):
         for block in self.input_blocks:
             h = block(h, t_emb)
             skips.append(h.feats)
-        
+
         if self.pe_mode == "ape":
             h = h + self.pos_embedder(h.coords[:, 1:]).type(self.dtype)
         for block in self.blocks:

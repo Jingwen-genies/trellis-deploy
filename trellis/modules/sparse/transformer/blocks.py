@@ -25,12 +25,15 @@ class SparseTransformerBlock(nn.Module):
     """
     Sparse Transformer block (MSA + FFN).
     """
+
     def __init__(
         self,
         channels: int,
         num_heads: int,
         mlp_ratio: float = 4.0,
-        attn_mode: Literal["full", "shift_window", "shift_sequence", "shift_order", "swin"] = "full",
+        attn_mode: Literal[
+            "full", "shift_window", "shift_sequence", "shift_order", "swin"
+        ] = "full",
         window_size: Optional[int] = None,
         shift_sequence: Optional[int] = None,
         shift_window: Optional[Tuple[int, int, int]] = None,
@@ -73,7 +76,9 @@ class SparseTransformerBlock(nn.Module):
 
     def forward(self, x: SparseTensor) -> SparseTensor:
         if self.use_checkpoint:
-            return torch.utils.checkpoint.checkpoint(self._forward, x, use_reentrant=False)
+            return torch.utils.checkpoint.checkpoint(
+                self._forward, x, use_reentrant=False
+            )
         else:
             return self._forward(x)
 
@@ -82,13 +87,16 @@ class SparseTransformerCrossBlock(nn.Module):
     """
     Sparse Transformer cross-attention block (MSA + MCA + FFN).
     """
+
     def __init__(
         self,
         channels: int,
         ctx_channels: int,
         num_heads: int,
         mlp_ratio: float = 4.0,
-        attn_mode: Literal["full", "shift_window", "shift_sequence", "shift_order", "swin"] = "full",
+        attn_mode: Literal[
+            "full", "shift_window", "shift_sequence", "shift_order", "swin"
+        ] = "full",
         window_size: Optional[int] = None,
         shift_sequence: Optional[int] = None,
         shift_window: Optional[Tuple[int, int, int]] = None,
@@ -146,6 +154,8 @@ class SparseTransformerCrossBlock(nn.Module):
 
     def forward(self, x: SparseTensor, context: torch.Tensor):
         if self.use_checkpoint:
-            return torch.utils.checkpoint.checkpoint(self._forward, x, context, use_reentrant=False)
+            return torch.utils.checkpoint.checkpoint(
+                self._forward, x, context, use_reentrant=False
+            )
         else:
             return self._forward(x, context)

@@ -18,7 +18,9 @@ class SLatRadianceFieldDecoder(SparseTransformerBase):
         num_heads: Optional[int] = None,
         num_head_channels: Optional[int] = 64,
         mlp_ratio: float = 4,
-        attn_mode: Literal["full", "shift_window", "shift_sequence", "shift_order", "swin"] = "swin",
+        attn_mode: Literal[
+            "full", "shift_window", "shift_sequence", "shift_order", "swin"
+        ] = "swin",
         window_size: int = 8,
         pe_mode: Literal["ape", "rope"] = "ape",
         use_fp16: bool = False,
@@ -57,16 +59,25 @@ class SLatRadianceFieldDecoder(SparseTransformerBase):
 
     def _calc_layout(self) -> None:
         self.layout = {
-            'trivec': {'shape': (self.rep_config['rank'], 3, self.rep_config['dim']), 'size': self.rep_config['rank'] * 3 * self.rep_config['dim']},
-            'density': {'shape': (self.rep_config['rank'],), 'size': self.rep_config['rank']},
-            'features_dc': {'shape': (self.rep_config['rank'], 1, 3), 'size': self.rep_config['rank'] * 3},
+            "trivec": {
+                "shape": (self.rep_config["rank"], 3, self.rep_config["dim"]),
+                "size": self.rep_config["rank"] * 3 * self.rep_config["dim"],
+            },
+            "density": {
+                "shape": (self.rep_config["rank"],),
+                "size": self.rep_config["rank"],
+            },
+            "features_dc": {
+                "shape": (self.rep_config["rank"], 1, 3),
+                "size": self.rep_config["rank"] * 3,
+            },
         }
         start = 0
         for k, v in self.layout.items():
-            v['range'] = (start, start + v['size'])
-            start += v['size']
-        self.out_channels = start    
-    
+            v["range"] = (start, start + v["size"])
+            start += v["size"]
+        self.out_channels = start
+
     def to_representation(self, x: sp.SparseTensor) -> List[Strivec]:
         """
         Convert a batch of network outputs to 3D representations.
@@ -83,15 +94,28 @@ class SLatRadianceFieldDecoder(SparseTransformerBase):
                 sh_degree=0,
                 resolution=self.resolution,
                 aabb=[-0.5, -0.5, -0.5, 1, 1, 1],
-                rank=self.rep_config['rank'],
-                dim=self.rep_config['dim'],
-                device='cuda',
+                rank=self.rep_config["rank"],
+                dim=self.rep_config["dim"],
+                device="cuda",
             )
             representation.density_shift = 0.0
-            representation.position = (x.coords[x.layout[i]][:, 1:].float() + 0.5) / self.resolution
-            representation.depth = torch.full((representation.position.shape[0], 1), int(np.log2(self.resolution)), dtype=torch.uint8, device='cuda')
+            representation.position = (
+                x.coords[x.layout[i]][:, 1:].float() + 0.5
+            ) / self.resolution
+            representation.depth = torch.full(
+                (representation.position.shape[0], 1),
+                int(np.log2(self.resolution)),
+                dtype=torch.uint8,
+                device="cuda",
+            )
             for k, v in self.layout.items():
-                setattr(representation, k, x.feats[x.layout[i]][:, v['range'][0]:v['range'][1]].reshape(-1, *v['shape']))
+                setattr(
+                    representation,
+                    k,
+                    x.feats[x.layout[i]][:, v["range"][0] : v["range"][1]].reshape(
+                        -1, *v["shape"]
+                    ),
+                )
             representation.trivec = representation.trivec + 1
             ret.append(representation)
         return ret

@@ -8,6 +8,7 @@ class Pipeline:
     """
     A base class for pipelines.
     """
+
     def __init__(
         self,
         models: dict[str, nn.Module] = None,
@@ -25,20 +26,21 @@ class Pipeline:
         """
         import os
         import json
+
         is_local = os.path.exists(f"{path}/pipeline.json")
 
         if is_local:
             config_file = f"{path}/pipeline.json"
         else:
             from huggingface_hub import hf_hub_download
+
             config_file = hf_hub_download(path, "pipeline.json")
 
-        with open(config_file, 'r') as f:
-            args = json.load(f)['args']
+        with open(config_file, "r") as f:
+            args = json.load(f)["args"]
 
         _models = {
-            k: models.from_pretrained(f"{path}/{v}")
-            for k, v in args['models'].items()
+            k: models.from_pretrained(f"{path}/{v}") for k, v in args["models"].items()
         }
 
         new_pipeline = Pipeline(_models)
@@ -48,10 +50,10 @@ class Pipeline:
     @property
     def device(self) -> torch.device:
         for model in self.models.values():
-            if hasattr(model, 'device'):
+            if hasattr(model, "device"):
                 return model.device
         for model in self.models.values():
-            if hasattr(model, 'parameters'):
+            if hasattr(model, "parameters"):
                 return next(model.parameters()).device
         raise RuntimeError("No device found.")
 

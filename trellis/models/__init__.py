@@ -1,19 +1,20 @@
 import importlib
 
 __attributes = {
-    'SparseStructureEncoder': 'sparse_structure_vae',
-    'SparseStructureDecoder': 'sparse_structure_vae',
-    'SparseStructureFlowModel': 'sparse_structure_flow',
-    'SLatEncoder': 'structured_latent_vae',
-    'SLatGaussianDecoder': 'structured_latent_vae',
-    'SLatRadianceFieldDecoder': 'structured_latent_vae',
-    'SLatMeshDecoder': 'structured_latent_vae',
-    'SLatFlowModel': 'structured_latent_flow',
+    "SparseStructureEncoder": "sparse_structure_vae",
+    "SparseStructureDecoder": "sparse_structure_vae",
+    "SparseStructureFlowModel": "sparse_structure_flow",
+    "SLatEncoder": "structured_latent_vae",
+    "SLatGaussianDecoder": "structured_latent_vae",
+    "SLatRadianceFieldDecoder": "structured_latent_vae",
+    "SLatMeshDecoder": "structured_latent_vae",
+    "SLatFlowModel": "structured_latent_flow",
 }
 
 __submodules = []
 
 __all__ = list(__attributes.keys()) + __submodules
+
 
 def __getattr__(name):
     if name not in globals():
@@ -41,6 +42,7 @@ def from_pretrained(path: str, **kwargs):
     import os
     import json
     from safetensors.torch import load_file
+
     is_local = os.path.exists(f"{path}.json") and os.path.exists(f"{path}.safetensors")
 
     if is_local:
@@ -48,23 +50,29 @@ def from_pretrained(path: str, **kwargs):
         model_file = f"{path}.safetensors"
     else:
         from huggingface_hub import hf_hub_download
-        path_parts = path.split('/')
-        repo_id = f'{path_parts[0]}/{path_parts[1]}'
-        model_name = '/'.join(path_parts[2:])
+
+        path_parts = path.split("/")
+        repo_id = f"{path_parts[0]}/{path_parts[1]}"
+        model_name = "/".join(path_parts[2:])
         config_file = hf_hub_download(repo_id, f"{model_name}.json")
         model_file = hf_hub_download(repo_id, f"{model_name}.safetensors")
 
-    with open(config_file, 'r') as f:
+    with open(config_file, "r") as f:
         config = json.load(f)
-    model = __getattr__(config['name'])(**config['args'], **kwargs)
+    model = __getattr__(config["name"])(**config["args"], **kwargs)
     model.load_state_dict(load_file(model_file))
 
     return model
 
 
 # For Pylance
-if __name__ == '__main__':
+if __name__ == "__main__":
     from .sparse_structure_vae import SparseStructureEncoder, SparseStructureDecoder
     from .sparse_structure_flow import SparseStructureFlowModel
-    from .structured_latent_vae import SLatEncoder, SLatGaussianDecoder, SLatRadianceFieldDecoder, SLatMeshDecoder
+    from .structured_latent_vae import (
+        SLatEncoder,
+        SLatGaussianDecoder,
+        SLatRadianceFieldDecoder,
+        SLatMeshDecoder,
+    )
     from .structured_latent_flow import SLatFlowModel
