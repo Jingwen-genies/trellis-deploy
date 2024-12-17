@@ -36,7 +36,7 @@
 ### Installation Steps
 1. Clone the repo:
     ```sh
-    git clone --recurse-submodules https://github.com/microsoft/TRELLIS.git
+    git clone --recurse-submodules git@github.com:Jingwen-genies/trellis-deploy.git
     cd TRELLIS
     ```
 
