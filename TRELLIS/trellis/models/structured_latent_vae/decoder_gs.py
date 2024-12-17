@@ -145,9 +145,40 @@ class SLatGaussianDecoder(SparseTransformerBase):
             ret.append(representation)
         return ret
 
-    def forward(self, x: sp.SparseTensor) -> List[Gaussian]:
-        h = super().forward(x)
+    def forward(
+        self, 
+        x: sp.SparseTensor,
+        callback: Optional[Callable[[int], None]] = None
+    ) -> List[Gaussian]:
+        """
+        Forward pass with optional progress tracking.
+        
+        Args:
+            x: Input sparse tensor
+            callback: Optional callback for progress tracking
+        """
+        total_steps = self.num_blocks + 2  # blocks + normalization + output
+        current_step = 0
+        
+        def progress_callback(block_num):
+            nonlocal current_step
+            current_step = block_num
+            if callback:
+                # Ensure progress stays within 0-100%
+                progress = min(100 * current_step / total_steps, 100)
+                callback(int(progress))
+                
+        # Process transformer blocks
+        h = super().forward(x, progress_callback=progress_callback)
+        
+        # Final processing
         h = h.type(x.dtype)
+        current_step += 1
+        progress_callback(current_step)
+        
         h = h.replace(F.layer_norm(h.feats, h.feats.shape[-1:]))
         h = self.out_layer(h)
+        current_step += 1
+        progress_callback(current_step)
+        
         return self.to_representation(h)

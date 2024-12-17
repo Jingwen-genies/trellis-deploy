@@ -1,0 +1,7 @@
+storage:
+  provider: s3
+  bucket: genies-ml-rnd
+  prefix: 3D-generation/trellis/
+  region: us-west-2
+  
+

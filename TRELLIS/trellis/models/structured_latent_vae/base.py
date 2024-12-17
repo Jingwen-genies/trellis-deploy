@@ -123,11 +123,22 @@ class SparseTransformerBase(nn.Module):
 
         self.apply(_basic_init)
 
-    def forward(self, x: sp.SparseTensor) -> sp.SparseTensor:
+    def forward(
+        self,
+        x: sp.SparseTensor,
+        progress_callback: Optional[Callable[[int], None]] = None
+    ) -> sp.SparseTensor:
+        """Forward pass with progress tracking"""
+        # Process input first
         h = self.input_layer(x)
         if self.pe_mode == "ape":
             h = h + self.pos_embedder(x.coords[:, 1:])
         h = h.type(self.dtype)
-        for block in self.blocks:
+        
+        # Then process transformer blocks with progress tracking
+        for i, block in enumerate(self.blocks):
             h = block(h)
+            if progress_callback:
+                # Report progress as step number, let child class handle normalization
+                progress_callback(i)
         return h

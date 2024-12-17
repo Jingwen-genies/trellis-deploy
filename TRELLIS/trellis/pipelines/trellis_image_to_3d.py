@@ -12,6 +12,10 @@ from .base import Pipeline
 from . import samplers
 from ..modules import sparse as sp
 from ..representations import Gaussian, Strivec, MeshExtractResult
+import logging
+import time
+
+logger = logging.getLogger('trellis-api.pipeline')
 
 
 class TrellisImageTo3DPipeline(Pipeline):
@@ -251,6 +255,7 @@ class TrellisImageTo3DPipeline(Pipeline):
         cond: dict,
         coords: torch.Tensor,
         sampler_params: dict = {},
+        progress_callback: Callable[[int], None] = None,
     ) -> sp.SparseTensor:
         """
         Sample structured latent with the given conditioning.
@@ -259,22 +264,30 @@ class TrellisImageTo3DPipeline(Pipeline):
             cond (dict): The conditioning information.
             coords (torch.Tensor): The coordinates of the sparse structure.
             sampler_params (dict): Additional parameters for the sampler.
+            progress_callback (Callable[[int], None]): Optional callback for progress tracking.
         """
+        logger.debug(f"Starting SLAT sampling with {len(coords)} coordinates")
+        
         # Sample structured latent
         flow_model = self.models["slat_flow_model"]
         noise = sp.SparseTensor(
             feats=torch.randn(coords.shape[0], flow_model.in_channels).to(self.device),
             coords=coords,
         )
+        logger.debug(f"Created noise tensor with shape {noise.feats.shape}")
+        
         sampler_params = {**self.slat_sampler_params, **sampler_params}
         slat = self.slat_sampler.sample(
-            flow_model, noise, **cond, **sampler_params, verbose=True
+            flow_model, noise, **cond, **sampler_params,
+            verbose=True, progress_callback=progress_callback
         ).samples
-
+        
+        logger.debug("Applying normalization")
         std = torch.tensor(self.slat_normalization["std"])[None].to(slat.device)
         mean = torch.tensor(self.slat_normalization["mean"])[None].to(slat.device)
         slat = slat * std + mean
-
+        
+        logger.debug(f"SLAT sampling complete, tensor shape: {slat.feats.shape}")
         return slat
 
     @torch.no_grad()
@@ -307,3 +320,144 @@ class TrellisImageTo3DPipeline(Pipeline):
         )
         slat = self.sample_slat(cond, coords, slat_sampler_params)
         return self.decode_slat(slat, formats)
+
+    @torch.no_grad()
+    def run_with_progress(
+        self,
+        image: Image.Image,
+        num_samples: int = 1,
+        seed: int = 42,
+        sparse_structure_sampler_params: dict = {},
+        slat_sampler_params: dict = {},
+        formats: List[str] = ["mesh", "gaussian", "radiance_field"],
+        preprocess_image: bool = True,
+        progress_callback: Callable[[float], None] = None,
+    ) -> dict:
+        """
+        Run the pipeline with progress tracking for each major step.
+        Progress distribution (based on timing):
+        - Preprocess & Conditioning: 0-3% (~2.4%)
+        - Sparse Structure: 3-13% (~9.6%)
+        - SLAT Sampling: 13-42% (~29.7%)
+        - Format Decoding: 42-100% (~58.3%)
+        """
+        def update_progress(progress):
+            if progress_callback:
+                logger.debug(f"Pipeline update_progress called with {progress:.2f}%")
+                progress_callback(min(progress, 100))
+
+        phase_start = time.time()
+        
+        # Step 1: Preprocess & Conditioning (0-3%)
+        preprocess_start = time.time()
+        if preprocess_image:
+            update_progress(1)
+            image = self.preprocess_image(image)
+            update_progress(2)
+        
+        update_progress(3)
+        cond = self.get_cond([image])
+        preprocess_time = time.time() - preprocess_start
+        logger.debug(f"Preprocess and conditioning took {preprocess_time:.2f}s")
+
+        # Step 2: Sparse Structure (3-13%)
+        structure_start = time.time()
+        torch.manual_seed(seed)
+        logger.debug("Starting sparse structure sampling")
+        
+        flow_model = self.models["sparse_structure_flow_model"]
+        reso = flow_model.resolution
+        noise = torch.randn(num_samples, flow_model.in_channels, reso, reso, reso).to(self.device)
+        sampler_params = {**self.sparse_structure_sampler_params, **sparse_structure_sampler_params}
+        
+        steps = sampler_params.get("steps", 20)
+        def sparse_progress_callback(step):
+            progress = 3 + (step / steps) * 10
+            logger.debug(f"Sparse structure step {step}/{steps}, progress: {progress:.2f}%")
+            update_progress(progress)
+        
+        z_s = self.sparse_structure_sampler.sample(
+            flow_model, noise, **cond, **sampler_params,
+            verbose=True, progress_callback=sparse_progress_callback
+        ).samples
+        
+        decoder = self.models["sparse_structure_decoder"]
+        logger.debug("Starting sparse structure decoding")
+        coords = torch.argwhere(decoder(z_s) > 0)[:, [0, 2, 3, 4]].int()
+        logger.debug(f"Found {len(coords)} coordinates")
+        update_progress(13)
+        
+        structure_time = time.time() - structure_start
+        logger.debug(f"Sparse structure sampling took {structure_time:.2f}s")
+
+        # Step 3: SLAT Sampling (13-42%)
+        slat_start = time.time()
+        logger.debug("Starting SLAT sampling")
+        steps = slat_sampler_params.get("steps", 20)
+        def slat_progress_callback(step):
+            progress = 13 + (step / steps) * 29
+            logger.debug(f"SLAT sampling step {step}/{steps}, progress: {progress:.2f}%")
+            update_progress(progress)
+        
+        slat = self.sample_slat(
+            cond, coords, slat_sampler_params,
+            progress_callback=slat_progress_callback
+        )
+        slat_time = time.time() - slat_start
+        logger.debug(f"SLAT sampling took {slat_time:.2f}s")
+        update_progress(42)
+
+        # Step 4: Format Decoding (42-100%)
+        decode_start = time.time()
+        logger.debug("Starting format decoding")
+        decode_range = 58  # 42-100%
+        progress_per_format = decode_range / len(formats)
+        
+        results = {}
+        format_times = {}
+        for idx, fmt in enumerate(formats):
+            format_start = time.time()
+            start_progress = 42 + (idx * progress_per_format)
+            end_progress = start_progress + progress_per_format
+            logger.debug(f"Starting {fmt} decoding ({start_progress:.1f}% - {end_progress:.1f}%)")
+            
+            def format_callback(decoder_progress):
+                overall_progress = start_progress + (decoder_progress / 100.0 * progress_per_format)
+                logger.debug(f"{fmt} decoding progress: {decoder_progress}%, overall: {overall_progress:.2f}%")
+                if progress_callback:
+                    logger.debug(f"Calling progress_callback with {overall_progress:.2f}%")
+                update_progress(overall_progress)
+            
+            if fmt == "gaussian":
+                decoder = self.models["slat_decoder_gs"]
+                results[fmt] = decoder(slat, callback=format_callback)
+            elif fmt == "mesh":
+                decoder = self.models["slat_decoder_mesh"]
+                results[fmt] = decoder(slat, callback=format_callback)
+            elif fmt == "radiance_field":
+                decoder = self.models["slat_decoder_rf"]
+                results[fmt] = decoder(slat, callback=format_callback)
+            
+            format_times[fmt] = time.time() - format_start
+            logger.debug(f"{fmt} decoding took {format_times[fmt]:.2f}s")
+        
+        decode_time = time.time() - decode_start
+        logger.debug(f"Total decoding took {decode_time:.2f}s")
+
+        # Final timing summary
+        total_time = time.time() - phase_start
+        format_summary = "\n          ".join([f"- {fmt}: {t:.2f}s ({(t/total_time)*100:.1f}%)" 
+                                            for fmt, t in format_times.items()])
+
+        logger.info(f"""Pipeline timing breakdown:
+            Preprocess & Conditioning: {preprocess_time:.2f}s ({(preprocess_time/total_time)*100:.1f}%)
+            Sparse Structure: {structure_time:.2f}s ({(structure_time/total_time)*100:.1f}%)
+            SLAT Sampling: {slat_time:.2f}s ({(slat_time/total_time)*100:.1f}%)
+            Format Decoding: {decode_time:.2f}s ({(decode_time/total_time)*100:.1f}%)
+                  {format_summary}
+            Total Pipeline: {total_time:.2f}s
+        """)
+        
+        return results
+
+

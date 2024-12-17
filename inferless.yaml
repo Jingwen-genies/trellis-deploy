@@ -1,0 +1,46 @@
+# Inferless config file (version: 1.0.0)
+version: 1.0.0
+
+name: trellis
+import_source: GIT
+
+# you can choose the options between ONNX, TENSORFLOW, PYTORCH
+source_framework_type: PYTORCH
+
+configuration:
+  # if you want to use a custom runtime, add the runtime id below.
+  # you can find it by running `inferless runtime list` or create one with `inferless runtime upload` and update this file it by running `inferless runtime select --id <RUNTIME_ID>`.
+  custom_runtime_id: ''
+
+  # if you want to use a custom volume, add the volume id and name below,
+  # you can find it by running `inferless volume list` or create one with `inferless volume create -n {VOLUME_NAME}`
+  custom_volume_id: ''
+  custom_volume_name: ''
+
+  gpu_type: a100
+  inference_time: '180'
+  is_dedicated: true
+  is_serverless: false
+  max_replica: '1'
+  min_replica: '0'
+  scale_down_delay: '600'
+  region: region-1
+  vcpu: '3'
+  ram: '20'
+env:
+  # Add your environment variables here
+  AWS_ACCESS_KEY_ID: <YOUR_AWS_ACCESS_KEY_ID>
+  AWS_SECRET_ACCESS_KEY: <YOUR_AWS_SECRET_ACCESS_KEY>
+  REGION_NAME: <YOUR_AWS_REGION>
+  BUCKET_NAME: <YOUR_S3_BUCKET_NAME>
+secrets:
+  # Add your secret ids here you can find it by running `inferless secrets list`
+  # - 65723205-ce21-4392-a10b-3tf00c58988c
+optional:
+  # you can update file names here
+  input_file_name: input.json
+  output_file_name: output.json
+  runtime_file_name: inferless-runtime-config.yaml
+model_url: https://github.com/Jingwen-genies/trellis-deploy.git
+provider: GITHUB
+io_schema: true

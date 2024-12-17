@@ -84,6 +84,7 @@ class FlowEulerSampler(Sampler):
         steps: int = 50,
         rescale_t: float = 1.0,
         verbose: bool = True,
+        progress_callback: Optional[Callable[[int], None]] = None,
         **kwargs
     ):
         """
@@ -96,6 +97,7 @@ class FlowEulerSampler(Sampler):
             steps: The number of steps to sample.
             rescale_t: The rescale factor for t.
             verbose: If True, show a progress bar.
+            progress_callback: Optional callback function to report progress (current step).
             **kwargs: Additional arguments for model_inference.
 
         Returns:
@@ -109,11 +111,19 @@ class FlowEulerSampler(Sampler):
         t_seq = rescale_t * t_seq / (1 + (rescale_t - 1) * t_seq)
         t_pairs = list((t_seq[i], t_seq[i + 1]) for i in range(steps))
         ret = edict({"samples": None, "pred_x_t": [], "pred_x_0": []})
-        for t, t_prev in tqdm(t_pairs, desc="Sampling", disable=not verbose):
+        
+        # Use tqdm for console progress and callback for external progress tracking
+        pbar = tqdm(t_pairs, desc="Sampling", disable=not verbose)
+        for step, (t, t_prev) in enumerate(pbar):
             out = self.sample_once(model, sample, t, t_prev, cond, **kwargs)
             sample = out.pred_x_prev
             ret.pred_x_t.append(out.pred_x_prev)
             ret.pred_x_0.append(out.pred_x_0)
+            
+            # Update progress through callback
+            if progress_callback is not None:
+                progress_callback(step)
+                
         ret.samples = sample
         return ret
 
@@ -134,6 +144,7 @@ class FlowEulerCfgSampler(ClassifierFreeGuidanceSamplerMixin, FlowEulerSampler):
         rescale_t: float = 1.0,
         cfg_strength: float = 3.0,
         verbose: bool = True,
+        progress_callback: Optional[Callable[[int], None]] = None,
         **kwargs
     ):
         """
@@ -148,6 +159,7 @@ class FlowEulerCfgSampler(ClassifierFreeGuidanceSamplerMixin, FlowEulerSampler):
             rescale_t: The rescale factor for t.
             cfg_strength: The strength of classifier-free guidance.
             verbose: If True, show a progress bar.
+            progress_callback: Optional callback function to report progress (current step).
             **kwargs: Additional arguments for model_inference.
 
         Returns:
@@ -163,6 +175,7 @@ class FlowEulerCfgSampler(ClassifierFreeGuidanceSamplerMixin, FlowEulerSampler):
             steps,
             rescale_t,
             verbose,
+            progress_callback=progress_callback,
             neg_cond=neg_cond,
             cfg_strength=cfg_strength,
             **kwargs
@@ -186,6 +199,7 @@ class FlowEulerGuidanceIntervalSampler(GuidanceIntervalSamplerMixin, FlowEulerSa
         cfg_strength: float = 3.0,
         cfg_interval: Tuple[float, float] = (0.0, 1.0),
         verbose: bool = True,
+        progress_callback: Optional[Callable[[int], None]] = None,
         **kwargs
     ):
         """
@@ -201,6 +215,7 @@ class FlowEulerGuidanceIntervalSampler(GuidanceIntervalSamplerMixin, FlowEulerSa
             cfg_strength: The strength of classifier-free guidance.
             cfg_interval: The interval for classifier-free guidance.
             verbose: If True, show a progress bar.
+            progress_callback: Optional callback function to report progress (current step).
             **kwargs: Additional arguments for model_inference.
 
         Returns:
@@ -216,6 +231,7 @@ class FlowEulerGuidanceIntervalSampler(GuidanceIntervalSamplerMixin, FlowEulerSa
             steps,
             rescale_t,
             verbose,
+            progress_callback=progress_callback,
             neg_cond=neg_cond,
             cfg_strength=cfg_strength,
             cfg_interval=cfg_interval,

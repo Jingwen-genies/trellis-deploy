@@ -372,25 +372,15 @@ def bake_texture(
     mode: Literal["fast", "opt"] = "opt",
     lambda_tv: float = 1e-2,
     verbose: bool = False,
+    progress_callback: Optional[Callable[[float], None]] = None,
 ):
     """
     Bake texture to a mesh from multiple observations.
-
-    Args:
-        vertices (np.array): Vertices of the mesh. Shape (V, 3).
-        faces (np.array): Faces of the mesh. Shape (F, 3).
-        uvs (np.array): UV coordinates of the mesh. Shape (V, 2).
-        observations (List[np.array]): List of observations. Each observation is a 2D image. Shape (H, W, 3).
-        masks (List[np.array]): List of masks. Each mask is a 2D image. Shape (H, W).
-        extrinsics (List[np.array]): List of extrinsics. Shape (4, 4).
-        intrinsics (List[np.array]): List of intrinsics. Shape (3, 3).
-        texture_size (int): Size of the texture.
-        near (float): Near plane of the camera.
-        far (float): Far plane of the camera.
-        mode (Literal['fast', 'opt']): Mode of texture baking.
-        lambda_tv (float): Weight of total variation loss in optimization.
-        verbose (bool): Whether to print progress.
     """
+    def update_progress(progress):
+        if progress_callback:
+            progress_callback(progress)
+
     vertices = torch.tensor(vertices).cuda()
     faces = torch.tensor(faces.astype(np.int32)).cuda()
     uvs = torch.tensor(uvs).cuda()
@@ -413,12 +403,7 @@ def bake_texture(
             (texture_size * texture_size), dtype=torch.float32
         ).cuda()
         rastctx = utils3d.torch.RastContext(backend="cuda")
-        for observation, view, projection in tqdm(
-            zip(observations, views, projections),
-            total=len(observations),
-            disable=not verbose,
-            desc="Texture baking (fast)",
-        ):
+        for i, (observation, view, projection) in enumerate(zip(observations, views, projections)):
             with torch.no_grad():
                 rast = utils3d.torch.rasterize_triangle_faces(
                     rastctx,
@@ -444,6 +429,7 @@ def bake_texture(
                 idx,
                 torch.ones((obs.shape[0]), dtype=torch.float32, device=texture.device),
             )
+            update_progress((i + 1) * 100 / len(observations))
 
         mask = texture_weights > 0
         texture[mask] /= texture_weights[mask][:, None]
@@ -530,7 +516,7 @@ def bake_texture(
                 optimizer.param_groups[0]["lr"] = cosine_anealing(
                     optimizer, step, total_steps, 1e-2, 1e-5
                 )
-                pbar.set_postfix({"loss": loss.item()})
+                update_progress(step * 100 / total_steps)
                 pbar.update()
         texture = np.clip(
             texture[0].flip(0).detach().cpu().numpy() * 255, 0, 255
@@ -554,6 +540,8 @@ def to_glb(
     texture_size: int = 1024,
     debug: bool = False,
     verbose: bool = True,
+    progress_callback: Optional[Callable[[float], None]] = None,
+    use_vertex_colors: bool = False
 ) -> trimesh.Trimesh:
     """
     Convert a generated asset to a glb file.
@@ -567,9 +555,16 @@ def to_glb(
         texture_size (int): Size of the texture.
         debug (bool): Whether to print debug information.
         verbose (bool): Whether to print progress.
+        progress_callback (Optional[Callable[[float], None]]): Callback for progress updates (0-100).
+        use_vertex_colors (bool): Whether to use vertex colors instead of textures.
     """
+    def update_progress(progress):
+        if progress_callback:
+            progress_callback(progress)
+
     vertices = mesh.vertices.cpu().numpy()
     faces = mesh.faces.cpu().numpy()
+    update_progress(5)  # Initial conversion done
 
     # mesh postprocess
     vertices, faces = postprocess_mesh(
@@ -585,17 +580,35 @@ def to_glb(
         debug=debug,
         verbose=verbose,
     )
+    update_progress(30)  # Mesh postprocessing done
+
+    if use_vertex_colors:
+        # Use vertex colors instead of textures
+        observations, _, _ = render_multiview(app_rep, resolution=512, nviews=1)
+        colors = observations[0]  # Use first view for vertex colors
+        mesh = trimesh.Trimesh(vertices, faces, vertex_colors=colors)
+        update_progress(100)
+        return mesh
 
     # parametrize mesh
     vertices, faces, uvs = parametrize_mesh(vertices, faces)
+    update_progress(40)  # UV mapping done
 
     # bake texture
     observations, extrinsics, intrinsics = render_multiview(
         app_rep, resolution=1024, nviews=100
     )
+    update_progress(50)  # Rendering done
+
     masks = [np.any(observation > 0, axis=-1) for observation in observations]
     extrinsics = [extrinsics[i].cpu().numpy() for i in range(len(extrinsics))]
     intrinsics = [intrinsics[i].cpu().numpy() for i in range(len(intrinsics))]
+
+    def texture_progress_callback(progress):
+        # Map texture baking progress (0-100) to overall progress (50-90)
+        overall_progress = 50 + (progress * 0.4)
+        update_progress(overall_progress)
+
     texture = bake_texture(
         vertices,
         faces,
@@ -608,7 +621,10 @@ def to_glb(
         mode="opt",
         lambda_tv=0.01,
         verbose=verbose,
+        progress_callback=texture_progress_callback
     )
+    update_progress(90)  # Texture baking done
+
     texture = Image.fromarray(texture)
 
     # rotate mesh (from z-up to y-up)
@@ -616,4 +632,6 @@ def to_glb(
     mesh = trimesh.Trimesh(
         vertices, faces, visual=trimesh.visual.TextureVisuals(uv=uvs, image=texture)
     )
+    update_progress(100)  # Final mesh creation done
+
     return mesh

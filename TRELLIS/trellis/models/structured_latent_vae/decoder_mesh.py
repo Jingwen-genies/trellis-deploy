@@ -8,7 +8,9 @@ from ...modules import sparse as sp
 from .base import SparseTransformerBase
 from ...representations import MeshExtractResult
 from ...representations.mesh import SparseFeatures2Mesh
+import logging
 
+logger = logging.getLogger(__name__)
 
 class SparseSubdivideBlock3d(nn.Module):
     """
@@ -175,10 +177,36 @@ class SLatMeshDecoder(SparseTransformerBase):
             ret.append(mesh)
         return ret
 
-    def forward(self, x: sp.SparseTensor) -> List[MeshExtractResult]:
-        h = super().forward(x)
-        for block in self.upsample:
+    def forward(
+        self, 
+        x: sp.SparseTensor,
+        callback: Optional[Callable[[int], None]] = None
+    ) -> List[MeshExtractResult]:
+        """
+        Forward pass with optional progress tracking.
+        Reports progress from 0 to 100%.
+        """
+        total_steps = self.num_blocks + len(self.upsample) + 2
+        
+        def progress_callback(block_num):
+            if callback:
+                progress = min(100 * block_num / total_steps, 100)
+                logger.debug(f"Decoder calling callback with {progress:.2f}%")
+                callback(int(progress))
+        
+        # Process transformer blocks (0 to num_blocks-1)
+        h = super().forward(x, progress_callback=progress_callback)
+        
+        # Process upsampling blocks
+        for i, block in enumerate(self.upsample):
             h = block(h)
+            progress_callback(self.num_blocks + i)
+        
+        # Final steps
         h = h.type(x.dtype)
+        progress_callback(self.num_blocks + len(self.upsample))
+        
         h = self.out_layer(h)
+        progress_callback(self.num_blocks + len(self.upsample) + 1)
+        
         return self.to_representation(h)
