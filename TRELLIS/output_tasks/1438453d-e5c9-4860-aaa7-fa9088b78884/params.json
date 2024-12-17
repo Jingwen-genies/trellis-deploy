@@ -1,0 +1,1 @@
+{"file_token": "c8d1d606-0a64-49af-9810-5d527135faa1", "model_version": "Trellis-image-large", "face_limit": 10000, "texture": true, "pbr": true, "texture_seed": 1, "geometry_seed": 1, "sparse_structure_steps": 20, "sparse_structure_strength": 7.5, "slat_steps": 20, "slat_strength": 3.0}
