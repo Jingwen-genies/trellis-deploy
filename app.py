@@ -56,22 +56,36 @@ class TrellisModel:
         self.pipeline = TrellisImageTo3DPipeline.from_pretrained("JeffreyXiang/TRELLIS-image-large")
         self.pipeline.cuda()
         
-    def process_image(self, image: Image.Image, params: dict) -> dict:
-        """Process an image with the Trellis pipeline"""
-        return self.pipeline.run(
-            image,
+    def process_image(self, image: Image.Image, params: dict, progress_callback=None) -> dict:
+        """
+        Process an image using Trellis pipeline with dynamic progress tracking.
+
+        Args:
+            image (Image.Image): The input image.
+            params (dict): Configuration parameters for the pipeline.
+            progress_callback (function): A callback to report progress.
+
+        Returns:
+            dict: The output of the pipeline.
+        """
+        # Run the pipeline with progress tracking callbacks
+        outputs = self.pipeline.run_with_progress(
+            image=image,
             seed=params.get('geometry_seed', 42),
             formats=["gaussian", "mesh"],
             preprocess_image=True,
             sparse_structure_sampler_params={
-                "steps": params.get('sparse_structure_steps', 12),
+                "steps": params.get('sparse_structure_steps', 20),
                 "cfg_strength": params.get('sparse_structure_strength', 7.5),
             },
             slat_sampler_params={
-                "steps": params.get('slat_steps', 12),
+                "steps": params.get('slat_steps', 20),
                 "cfg_strength": params.get('slat_strength', 3.0),
             },
+            progress_callback=progress_callback
         )
+
+        return outputs
 
 class TaskManager:
     """Task management class"""
@@ -99,21 +113,25 @@ class TaskManager:
         
     def process_task(self, task_id: str, image_path: str, params: dict):
         """Process a task in background"""
-        task_dir = self.get_task_dir(task_id)
-        
         try:
+            # Phase 1: Initial setup (0-2%)
+            start_time = time.time()
             logger.info(f"Starting task processing for task_id: {task_id}")
             self.tasks[task_id]['status'] = 'processing'
-            self.tasks[task_id]['progress'] = 10
+            self.tasks[task_id]['progress'] = 0
             
-            # Copy and upload input image
+            # Copy input image
+            task_dir = self.get_task_dir(task_id)
             task_image_path = os.path.join(task_dir, 'input.png')
             shutil.copy2(image_path, task_image_path)
-            logger.debug(f"Copied input image to task directory: {task_image_path}")
+            logger.debug(f"Task {task_id}: Copied input image, progress: 1%")
+            self.tasks[task_id]['progress'] = 1
             
+            # Upload input image to S3
             s3_input_path = f"{self.config.s3_output_dir}/{task_id}/input.png"
             self.config.storage.upload_file(task_image_path, s3_input_path)
-            logger.debug(f"Uploaded input image to S3: {s3_input_path}")
+            logger.debug(f"Task {task_id}: Uploaded input image, progress: 2%")
+            self.tasks[task_id]['progress'] = 2
             
             # Save and upload parameters
             params_path = os.path.join(task_dir, 'params.json')
@@ -121,48 +139,84 @@ class TaskManager:
                 json.dump(params, f)
             s3_params_path = f"{self.config.s3_output_dir}/{task_id}/params.json"
             self.config.storage.upload_file(params_path, s3_params_path)
-            logger.debug(f"Uploaded parameters to S3: {s3_params_path}")
+            logger.debug(f"Task {task_id}: Uploaded parameters, progress: 3%")
+            self.tasks[task_id]['progress'] = 3
             
-            # Process image
-            logger.info(f"Processing image for task {task_id}")
+            setup_time = time.time() - start_time
+            logger.debug(f"Phase 1 (Setup) took {setup_time:.2f}s")
+            
+            # Phase 2: Model Processing (2-35%)
+            model_start = time.time()
+            logger.debug(f"Task {task_id}: Starting Phase 2 - Model Processing")
+            def model_progress_callback(progress):
+                """Maps model progress (0-100) to Phase 2 range (2-35)"""
+                overall_progress = 2 + (progress * 0.33)  # Map 0-100 to 2-35
+                self.tasks[task_id]['progress'] = overall_progress
+                logger.debug(f"Task {task_id}: Model processing progress: {overall_progress:.2f}%")
+            
             image = Image.open(task_image_path)
-            outputs = self.model.process_image(image, params)
-            logger.info(f"Pipeline completed for task {task_id}")
+            outputs = self.model.process_image(image, params, progress_callback=model_progress_callback)
+            model_time = time.time() - model_start
+            logger.debug(f"Phase 2 (Model Processing) took {model_time:.2f}s")
             
-            self.tasks[task_id]['progress'] = 70
+            # Phase 3: Post-processing (35-100%)
+            post_start = time.time()
+            logger.debug(f"Task {task_id}: Starting Post-processing")
             
-            # Generate and save GLB
-            logger.info(f"Generating GLB for task {task_id}")
+            # Generate GLB
+            glb_start = time.time()
+            logger.debug(f"Task {task_id}: Starting GLB generation")
+            self.tasks[task_id]['progress'] = 35
             glb = postprocessing_utils.to_glb(
                 outputs["gaussian"][0],
                 outputs["mesh"][0],
                 simplify=0.95,
                 texture_size=1024,
-                verbose=False
+                verbose=False,
+                use_vertex_colors=False
             )
+            glb_time = time.time() - glb_start
+            logger.debug(f"GLB generation took {glb_time:.2f}s")
+            self.tasks[task_id]['progress'] = 90
             
+            # Save and upload results
+            save_start = time.time()
             glb_path = os.path.join(task_dir, 'model.glb')
             glb.export(glb_path)
-            logger.debug(f"Saved GLB locally: {glb_path}")
+            save_time = time.time() - save_start
+            logger.debug(f"GLB save took {save_time:.2f}s")
+            self.tasks[task_id]['progress'] = 95
             
-            # Upload GLB
-            s3_path = f"{self.config.s3_output_dir}/{task_id}/model.glb" # s3 path without bucket
+            upload_start = time.time()
+            s3_path = f"{self.config.s3_output_dir}/{task_id}/model.glb"
             self.config.storage.upload_file(glb_path, s3_path)
-            # Create direct S3 URL
-            s3_url = f"s3://{self.config.storage.bucket_name}/{s3_path}"
-            logger.info(f"S3 URL for GLB: {s3_url}")
+            upload_time = time.time() - upload_start
+            logger.debug(f"S3 upload took {upload_time:.2f}s")
             
-            # Update task status
+            post_time = time.time() - post_start
+            logger.debug(f"Phase 3 (Post-processing) took {post_time:.2f}s")
+            
+            total_time = time.time() - start_time
+            logger.info(f"""Task timing breakdown:
+                Setup: {setup_time:.2f}s ({(setup_time/total_time)*100:.1f}%)
+                Model: {model_time:.2f}s ({(model_time/total_time)*100:.1f}%)
+                Post-processing: {post_time:.2f}s ({(post_time/total_time)*100:.1f}%)
+                  - GLB Generation: {glb_time:.2f}s
+                  - Save: {save_time:.2f}s
+                  - Upload: {upload_time:.2f}s
+                Total: {total_time:.2f}s
+            """)
+            
+            # Complete task
+            s3_url = f"s3://{self.config.storage.bucket_name}/{s3_path}"
             self.tasks[task_id]['status'] = 'completed'
             self.tasks[task_id]['progress'] = 100
             self.tasks[task_id]['output'] = {'model': s3_url}
             
             self.save_task_metadata(task_id, self.tasks[task_id])
-            logger.info(f"Task {task_id} completed successfully")
             
             # Cleanup
             shutil.rmtree(task_dir)
-            logger.debug(f"Cleaned up task directory: {task_dir}")
             
         except Exception as e:
             logger.error(f"Task {task_id} failed: {str(e)}", exc_info=True)
@@ -171,7 +225,7 @@ class TaskManager:
             self.save_task_metadata(task_id, self.tasks[task_id])
             if os.path.exists(task_dir):
                 shutil.rmtree(task_dir)
-                logger.debug(f"Cleaned up task directory after failure: {task_dir}")
+                logger.debug(f"Task {task_id}: Cleaned up task directory after failure")
                 
     def create_task(self, file_token: str, params: dict) -> str:
         """Create a new task"""
