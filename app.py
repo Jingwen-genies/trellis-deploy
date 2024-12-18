@@ -258,8 +258,8 @@ class TaskManager:
             glb = postprocessing_utils.to_glb(
                 outputs["gaussian"][0],
                 outputs["mesh"][0],
-                simplify=0.95,
-                texture_size=1024,
+                simplify=params.get('simplify', 0.95),
+                texture_size=params.get('texture_size', 1024),
                 verbose=False,
                 use_vertex_colors=False,
                 progress_callback=postprocessing_progress_callback
@@ -512,13 +512,13 @@ class TrellisAPI:
         """Validate task parameters and return file_token and validated params"""
         if not data:
             raise ValueError("Invalid request format")
-            
+        
         if data.get('type') != 'image_to_model':
             raise ValueError("Invalid task type")
-            
+        
         if not data.get('file'):
             raise ValueError("File information missing")
-            
+        
         if not data['file'].get('type') not in ['png', 'jpeg', 'jpg']:
             raise ValueError("Unsupported file type")
             
@@ -527,44 +527,46 @@ class TrellisAPI:
             raise ValueError("File token missing")
             
         # Validate numeric parameters
-        face_limit = int(data.get('face_limit', 10000))
-        if face_limit <= 0:
-            raise ValueError("face_limit must be positive")
-            
-        texture_seed = int(data.get('texture_seed', 0))
-        geometry_seed = int(data.get('geometry_seed', 0))
-        
-        if texture_seed < 0 or texture_seed > self.config.MAX_SEED:
-            raise ValueError(f"texture_seed must be between 0 and {self.config.MAX_SEED}")
+        geometry_seed = int(data.get('geometry_seed', 42))
         if geometry_seed < 0 or geometry_seed > self.config.MAX_SEED:
             raise ValueError(f"geometry_seed must be between 0 and {self.config.MAX_SEED}")
             
-        sparse_structure_steps = int(data.get('sparse_structure_steps', 20))
-        sparse_structure_strength = float(data.get('sparse_structure_strength', 7.5))
-        slat_steps = int(data.get('slat_steps', 20))
-        slat_strength = float(data.get('slat_strength', 3.0))
+        # Validate mesh processing parameters
+        simplify = float(data.get('simplify', 0.95))
+        if not 0 <= simplify <= 1:
+            raise ValueError("simplify must be between 0 and 1")
         
+        texture_size = int(data.get('texture_size', 1024))
+        valid_texture_sizes = [512, 1024, 2048]
+        if texture_size not in valid_texture_sizes:
+            raise ValueError(f"texture_size must be one of: {valid_texture_sizes}")
+
+        sparse_structure_steps = int(data.get('sparse_structure_steps', 12))
         if sparse_structure_steps < 1:
             raise ValueError("sparse_structure_steps must be positive")
-        if slat_steps < 1:
-            raise ValueError("slat_steps must be positive")
+
+        sparse_structure_strength = float(data.get('sparse_structure_strength', 7.5))
         if sparse_structure_strength <= 0:
             raise ValueError("sparse_structure_strength must be positive")
+            
+        slat_steps = int(data.get('slat_steps', 12))
+        if slat_steps < 1:
+            raise ValueError("slat_steps must be positive")
+            
+        slat_strength = float(data.get('slat_strength', 3.0))
         if slat_strength <= 0:
             raise ValueError("slat_strength must be positive")
             
         params = {
             'file_token': file_token,
             'model_version': data.get('model_version', 'default'),
-            'face_limit': face_limit,
-            'texture': bool(data.get('texture', True)),
-            'pbr': bool(data.get('pbr', True)),
-            'texture_seed': texture_seed,
             'geometry_seed': geometry_seed,
-            'sparse_structure_steps': sparse_structure_steps,
-            'sparse_structure_strength': sparse_structure_strength,
-            'slat_steps': slat_steps,
-            'slat_strength': slat_strength
+            'sparse_structure_steps': int(data.get('sparse_structure_steps', 20)),
+            'sparse_structure_strength': float(data.get('sparse_structure_strength', 7.5)),
+            'slat_steps': int(data.get('slat_steps', 20)),
+            'slat_strength': float(data.get('slat_strength', 3.0)),
+            'simplify': simplify,
+            'texture_size': texture_size
         }
         
         return file_token, params

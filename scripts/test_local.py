@@ -30,7 +30,8 @@ def upload_image(file_path):
 
 def submit_image_to_model(
           image_token, model_version, texture_seed, geometry_seed, face_limit=10000,
-          sparse_structure_steps=20, sparse_structure_strength=7.5, slat_steps=20, slat_strength=3.0
+          sparse_structure_steps=20, sparse_structure_strength=7.5, slat_steps=20, slat_strength=3.0,
+          simplify=0.7, texture_size=2048,
     ):
         payload = {
             "type": "image_to_model",
@@ -48,6 +49,8 @@ def submit_image_to_model(
             "sparse_structure_strength": sparse_structure_strength,
             "slat_steps": slat_steps,
             "slat_strength": slat_strength,
+            "simplify": simplify,
+            "texture_size": texture_size,
         }
         headers = {
             "Content-Type": "application/json",

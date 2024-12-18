@@ -43,11 +43,12 @@ def get_task_status_safe(task_id, task_number):
             'error': str(e)
         }
 
-def print_task_group_status(task_info):
+def print_task_group_status(task_info, completed_tasks=None):
     """Print status for all tasks in a formatted way"""
+    completed_tasks = completed_tasks or []
     print("\n=== Current Tasks Status ===")
-    print("Task# | Status     | Progress | Active/Max | Queue Pos | ID")
-    print("-" * 70)
+    print("Task# | Status     | Progress  | Active/Max | Queue Pos | ID       | Time")
+    print("-" * 80)  # Increased width for the new column
     
     all_statuses = []
     for task_id, task_number in task_info.items():
@@ -63,10 +64,20 @@ def print_task_group_status(task_info):
         max_tasks = queue_info.get('max_concurrent_tasks', '?')
         queue_pos = queue_info.get('queue_position', '?')
         
-        print(f"#{status['task_number']:<4} | {status['status']:<10} | {status['progress']:>3}%     | "
-              f"{active}/{max_tasks:<8} | {queue_pos:<9} | {status['task_id'][:8]}")
+        progress_str = f"{status['progress']:>7.1f}%"
+        
+        # Add completion time if task is finished
+        time_str = ""
+        if status['status'] == 'success':
+            completion_time = next((t['completion_time'] for t in completed_tasks 
+                                 if t['task_id'] == status['task_id']), None)
+            if completion_time:
+                time_str = f"| {completion_time:>6.1f}s"
+        
+        print(f"#{status['task_number']:<4} | {status['status']:<10} | {progress_str} | "
+              f"{active}/{max_tasks:<8} | {queue_pos:<9} | {status['task_id'][:8]} {time_str}")
     
-    print("-" * 70)
+    print("-" * 80)
     
     # Check if all tasks are completed or failed
     completed = all(s['status'] in ['success', 'failed'] for s in all_statuses)
@@ -97,7 +108,9 @@ def test_concurrent_tasks(num_tasks=5):
                 sparse_structure_steps=12,
                 sparse_structure_strength=7.5,
                 slat_steps=12,
-                slat_strength=3.0
+                slat_strength=3.0,
+                simplify=0.7,
+                texture_size=2048,
             )
             task_info[task_id] = task_number
             print(f"✓ Task {task_number} submitted. ID: {task_id[:8]}")
@@ -111,7 +124,7 @@ def test_concurrent_tasks(num_tasks=5):
     completed_tasks = []
     
     while True:
-        all_completed, statuses = print_task_group_status(task_info)
+        all_completed, statuses = print_task_group_status(task_info, completed_tasks)
         
         # Collect completed tasks
         for status in statuses:
@@ -125,7 +138,7 @@ def test_concurrent_tasks(num_tasks=5):
         if all_completed:
             break
             
-        time.sleep(5)  # Update every 5 seconds
+        time.sleep(5)
     
     # 4. Download completed models
     print("\n4. Downloading completed models...")
