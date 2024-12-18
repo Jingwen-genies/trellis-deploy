@@ -14,6 +14,9 @@ from TRELLIS.trellis.utils import postprocessing_utils
 from scripts.storage import get_storage_provider
 from scripts.config import load_config
 from scripts.logger_setup import setup_logging
+import requests
+from urllib.parse import urlparse
+from botocore.exceptions import ClientError
 
 # Initialize logger
 logger = setup_logging()
@@ -32,8 +35,8 @@ class TrellisConfig:
         
         # Load config file
         config = load_config("./config.yaml")
-        self.s3_input_dir = config["storage"]['prefix'] + "input_images"
-        self.s3_output_dir = config["storage"]['prefix'] + "output_tasks"
+        self.storage_input_dir = config["storage"]['prefix'] + "input_images"
+        self.storage_output_dir = config["storage"]['prefix'] + "output_tasks"
         
         # Create necessary directories
         os.makedirs(self.IMAGES_DIR, exist_ok=True)
@@ -41,6 +44,7 @@ class TrellisConfig:
         
         # Initialize storage
         self.storage = get_storage_provider(config["storage"])
+        self.storage_type = config["storage"]['provider']
         
         # Log configuration
         logger.info(f"TEMP_DIR: {self.TEMP_DIR}")
@@ -101,15 +105,15 @@ class TaskManager:
         return task_dir
         
     def save_task_metadata(self, task_id: str, metadata: dict):
-        """Save task metadata to task directory and S3"""
+        """Save task metadata to task directory and storage provider"""
         task_dir = self.get_task_dir(task_id)
         metadata_path = os.path.join(task_dir, 'metadata.json')
         
         with open(metadata_path, 'w') as f:
             json.dump(metadata, f)
         
-        s3_path = f"{self.config.s3_output_dir}/{task_id}/metadata.json"
-        return self.config.storage.upload_file(metadata_path, s3_path)
+        storage_path = f"{self.config.storage_output_dir}/{task_id}/metadata.json"
+        return self.config.storage.upload_file(metadata_path, storage_path)
         
     def process_task(self, task_id: str, image_path: str, params: dict):
         """Process a task in background"""
@@ -127,9 +131,9 @@ class TaskManager:
             logger.debug(f"Task {task_id}: Copied input image, progress: 1%")
             self.tasks[task_id]['progress'] = 1
             
-            # Upload input image to S3
-            s3_input_path = f"{self.config.s3_output_dir}/{task_id}/input.png"
-            self.config.storage.upload_file(task_image_path, s3_input_path)
+            # Upload input image to storage provider
+            storage_input_path = f"{self.config.storage_output_dir}/{task_id}/input.png"
+            self.config.storage.upload_file(task_image_path, storage_input_path)
             logger.debug(f"Task {task_id}: Uploaded input image, progress: 2%")
             self.tasks[task_id]['progress'] = 2
             
@@ -137,8 +141,8 @@ class TaskManager:
             params_path = os.path.join(task_dir, 'params.json')
             with open(params_path, 'w') as f:
                 json.dump(params, f)
-            s3_params_path = f"{self.config.s3_output_dir}/{task_id}/params.json"
-            self.config.storage.upload_file(params_path, s3_params_path)
+            storage_params_path = f"{self.config.storage_output_dir}/{task_id}/params.json"
+            self.config.storage.upload_file(params_path, storage_params_path)
             logger.debug(f"Task {task_id}: Uploaded parameters, progress: 3%")
             self.tasks[task_id]['progress'] = 3
             
@@ -162,7 +166,13 @@ class TaskManager:
             # Phase 3: Post-processing (35-100%)
             post_start = time.time()
             logger.debug(f"Task {task_id}: Starting Post-processing")
-            
+
+            def postprocessing_progress_callback(progress):
+                """Maps postprocessing progress (0-100) to Phase 3 range (35-90)"""
+                overall_progress = 35 + (progress * 0.55)  # Map 0-100 to 35-90
+                self.tasks[task_id]['progress'] = overall_progress
+                logger.debug(f"Task {task_id}: Post-processing progress: {overall_progress:.2f}%")
+
             # Generate GLB
             glb_start = time.time()
             logger.debug(f"Task {task_id}: Starting GLB generation")
@@ -173,7 +183,8 @@ class TaskManager:
                 simplify=0.95,
                 texture_size=1024,
                 verbose=False,
-                use_vertex_colors=False
+                use_vertex_colors=False,
+                progress_callback=postprocessing_progress_callback
             )
             glb_time = time.time() - glb_start
             logger.debug(f"GLB generation took {glb_time:.2f}s")
@@ -188,10 +199,10 @@ class TaskManager:
             self.tasks[task_id]['progress'] = 95
             
             upload_start = time.time()
-            s3_path = f"{self.config.s3_output_dir}/{task_id}/model.glb"
-            self.config.storage.upload_file(glb_path, s3_path)
+            storage_model_path = f"{self.config.storage_output_dir}/{task_id}/model.glb"
+            download_temp_url = self.config.storage.upload_file(glb_path, storage_model_path)
             upload_time = time.time() - upload_start
-            logger.debug(f"S3 upload took {upload_time:.2f}s")
+            logger.debug(f"Storage provider upload took {upload_time:.2f}s")
             
             post_time = time.time() - post_start
             logger.debug(f"Phase 3 (Post-processing) took {post_time:.2f}s")
@@ -208,10 +219,17 @@ class TaskManager:
             """)
             
             # Complete task
-            s3_url = f"s3://{self.config.storage.bucket_name}/{s3_path}"
+            if self.config.storage_type == "s3":
+                s3_url = f"s3://{self.config.storage.bucket_name}/{storage_model_path}"
+            else:
+                s3_url = ""
+            if self.config.storage_type == "gcs":
+                gcs_url = f"https://storage.googleapis.com/{self.config.storage.bucket_name}/{storage_model_path}"  
+            else:
+                gcs_url = ""
             self.tasks[task_id]['status'] = 'completed'
             self.tasks[task_id]['progress'] = 100
-            self.tasks[task_id]['output'] = {'model': s3_url}
+            self.tasks[task_id]['output'] = {'model': download_temp_url, "s3_url": s3_url, "gcs_url": gcs_url}
             
             self.save_task_metadata(task_id, self.tasks[task_id])
             
@@ -238,6 +256,14 @@ class TaskManager:
         }
         return task_id
         
+    def is_url_expired(self, url: str) -> bool:
+        """Check if a URL is expired by making a HEAD request"""
+        try:
+            response = requests.head(url, allow_redirects=True, timeout=5)
+            return response.status_code != 200
+        except requests.RequestException:
+            return True
+
     def get_task_status(self, task_id: str) -> dict:
         """Get task status with proper mapping"""
         if task_id not in self.tasks:
@@ -250,6 +276,24 @@ class TaskManager:
             'completed': 'success',
             'failed': 'failed'
         }
+
+        # generate a new presigned url for the model if the task is completed and the model url is expired
+        if status_data['status'] == 'completed':
+            try:
+                model_url = status_data["output"].get("model")
+                
+                # Check if we need to generate a new URL
+                need_new_url = (
+                    not model_url or 
+                    (isinstance(model_url, str) and self.is_url_expired(model_url))
+                )
+                if need_new_url:
+                    storage_url = f"{self.config.storage_output_dir}/{task_id}/model.glb"
+                    status_data['output']['model'] = self.config.storage.get_url(storage_url)
+                    logger.debug(f"Generated new presigned URL for task {task_id}")
+            except Exception as e:
+                logger.error(f"Failed to generate presigned URL for task {task_id}: {str(e)}")
+                # Keep the existing URL if we fail to generate a new one
         
         return {
             'message': f"Task is {status_mapping.get(status_data['status'], 'unknown')}",
@@ -328,9 +372,9 @@ class TrellisAPI:
                 f.write(file.read())
             logger.debug(f"Saved file locally: {temp_path}")
             
-            s3_path = f"{self.config.s3_input_dir}/{image_token}.png"
-            s3_url = self.config.storage.upload_file(temp_path, s3_path)
-            logger.info(f"Uploaded file to S3: {s3_path}")
+            storage_path = f"{self.config.storage_input_dir}/{image_token}.png"
+            storage_url = self.config.storage.upload_file(temp_path, storage_path)
+            logger.info(f"Uploaded file to storage provider: {storage_path}")
             
             os.remove(temp_path)
             logger.debug(f"Cleaned up temporary file: {temp_path}")
@@ -340,7 +384,7 @@ class TrellisAPI:
                 'data': {
                     'message': 'Image uploaded successfully',
                     'image_token': image_token,
-                    's3_url': s3_url,
+                    'storage_url': storage_url,
                     'type': 'image',
                     'size': file_size,
                     'width': width,
@@ -433,9 +477,9 @@ class TrellisAPI:
             
             # Download input image
             try:
-                s3_path = f"{self.config.s3_input_dir}/{file_token}.png"
+                image_path_in_storage_url = f"{self.config.storage_input_dir}/{file_token}.png"
                 download_path = os.path.join(self.config.IMAGES_DIR, f"{file_token}.png")
-                self.config.storage.download_file(s3_path, download_path)
+                self.config.storage.download_file(image_path_in_storage_url, download_path)
                 
                 with Image.open(download_path) as img:
                     img.verify()

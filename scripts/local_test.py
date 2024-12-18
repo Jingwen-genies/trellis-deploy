@@ -2,7 +2,7 @@ import requests
 from pathlib import Path
 import os
 import time
-import boto3
+# import boto3
 from urllib.parse import urlparse
 
 url_upload = "http://localhost:5000/trellis/upload"
@@ -63,35 +63,61 @@ def get_task_status(task_id):
     else:
         raise Exception(f"Failed to get task status: {response.text}")
 
-def download_model(url, out_file_path):
-    """Download the model file from S3 URL and save it to the specified path."""
+def download_model(url, task_id, out_file_path):
+    """Download the model file from either presigned URL or S3 URL and save it to the specified path."""
     out_file_path.parent.mkdir(parents=True, exist_ok=True)
     
-    # Parse S3 URL
-    if not url.startswith('s3://'):
-        raise ValueError(f"Expected S3 URL (s3://...), got: {url}")
-    
-    parsed_url = urlparse(url)
-    bucket_name = parsed_url.netloc
-    s3_key = parsed_url.path.lstrip('/')
-    
-    try:
-        # Initialize S3 client
-        s3_client = boto3.client('s3')
-        print(f"Downloading from S3: bucket={bucket_name}, key={s3_key}")
-        
-        # Download the file
-        s3_client.download_file(
-            Bucket=bucket_name,
-            Key=s3_key,
-            Filename=str(out_file_path)
-        )
-        
-        print(f"Successfully downloaded to: {out_file_path}")
-        return out_file_path
-        
-    except Exception as e:
-        raise Exception(f"Failed to download model from S3: {str(e)}")
+    # Check if it's a presigned URL or S3 URL
+    if url.startswith('https://'):
+        try:
+            # Direct download using presigned URL
+            print(f"Downloading from presigned URL")
+            response = requests.get(url, stream=True)
+            if response.status_code != 200:
+                # fetch a new url using task_id with get_task_status
+                data = get_task_status(task_id)
+                url = data['output']['model']
+                response = requests.get(url, stream=True)
+
+            response.raise_for_status()  # Raise an exception for bad status codes
+            
+            # Write the file
+            with open(out_file_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+                    
+            print(f"Successfully downloaded to: {out_file_path}")
+            return out_file_path
+            
+        except Exception as e:
+            raise Exception(f"Failed to download model from presigned URL: {str(e)}")
+            
+    elif url.startswith('s3://'):
+        try:
+            import boto3
+            # Parse S3 URL
+            parsed_url = urlparse(url)
+            bucket_name = parsed_url.netloc
+            s3_key = parsed_url.path.lstrip('/')
+            
+            # Initialize S3 client
+            s3_client = boto3.client('s3')
+            print(f"Downloading from S3: bucket={bucket_name}, key={s3_key}")
+            
+            # Download the file
+            s3_client.download_file(
+                Bucket=bucket_name,
+                Key=s3_key,
+                Filename=str(out_file_path)
+            )
+            
+            print(f"Successfully downloaded to: {out_file_path}")
+            return out_file_path
+            
+        except Exception as e:
+            raise Exception(f"Failed to download model from S3: {str(e)}")
+    else:
+        raise ValueError(f"Invalid URL format. URL must start with 'https://' or 's3://'. Got: {url}")
 
 if __name__ == "__main__":
     # Check AWS environment variables
@@ -133,6 +159,7 @@ if __name__ == "__main__":
 
         # 3. Poll for completion
         print("\n3. Waiting for task completion...")
+        start_time = time.time()
         while True:
             data = get_task_status(task_id)
             status = data.get('status')
@@ -143,20 +170,22 @@ if __name__ == "__main__":
             if status == 'success':
                 print("✓ Task completed successfully!")
                 print(data)
+                print(f"Time taken: {time.time() - start_time:.2f} seconds")
                 break
             elif status == 'failed':
                 error = data.get('error', 'Unknown error')
                 print(f"✗ Task failed: {error}")
                 raise Exception(f"Task processing failed: {error}")
             
-            time.sleep(0.5)  # Wait 0.5 seconds before next check
+            time.sleep(2)  # Wait 0.5 seconds before next check
 
+        time.sleep(65)
         # 4. Download result
         print("\n4. Downloading result")
         if 'model' in data.get('output', {}):
             url = data['output']['model']
             output_path = Path("./result.glb")
-            download_model(url, output_path)
+            download_model(url, task_id, output_path)
             print(f"✓ Model downloaded successfully to: {output_path.absolute()}")
         else:
             print("✗ No model URL in response")

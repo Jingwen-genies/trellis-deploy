@@ -37,7 +37,7 @@
 1. Clone the repo:
     ```sh
     git clone --recurse-submodules git@github.com:Jingwen-genies/trellis-deploy.git
-    cd TRELLIS
+    cd trellis-deploy
     ```
 
 2. Install the dependencies:

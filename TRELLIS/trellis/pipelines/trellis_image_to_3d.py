@@ -200,6 +200,7 @@ class TrellisImageTo3DPipeline(Pipeline):
         cond: dict,
         num_samples: int = 1,
         sampler_params: dict = {},
+        verbose: bool = True,
     ) -> torch.Tensor:
         """
         Sample sparse structures with the given conditioning.
@@ -217,7 +218,7 @@ class TrellisImageTo3DPipeline(Pipeline):
         )
         sampler_params = {**self.sparse_structure_sampler_params, **sampler_params}
         z_s = self.sparse_structure_sampler.sample(
-            flow_model, noise, **cond, **sampler_params, verbose=True
+            flow_model, noise, **cond, **sampler_params, verbose=verbose
         ).samples
 
         # Decode occupancy latent
@@ -256,6 +257,7 @@ class TrellisImageTo3DPipeline(Pipeline):
         coords: torch.Tensor,
         sampler_params: dict = {},
         progress_callback: Callable[[int], None] = None,
+        verbose: bool = True,
     ) -> sp.SparseTensor:
         """
         Sample structured latent with the given conditioning.
@@ -279,7 +281,7 @@ class TrellisImageTo3DPipeline(Pipeline):
         sampler_params = {**self.slat_sampler_params, **sampler_params}
         slat = self.slat_sampler.sample(
             flow_model, noise, **cond, **sampler_params,
-            verbose=True, progress_callback=progress_callback
+            verbose=verbose, progress_callback=progress_callback
         ).samples
         
         logger.debug("Applying normalization")
@@ -378,7 +380,7 @@ class TrellisImageTo3DPipeline(Pipeline):
         
         z_s = self.sparse_structure_sampler.sample(
             flow_model, noise, **cond, **sampler_params,
-            verbose=True, progress_callback=sparse_progress_callback
+            verbose=False, progress_callback=sparse_progress_callback
         ).samples
         
         decoder = self.models["sparse_structure_decoder"]
@@ -401,6 +403,7 @@ class TrellisImageTo3DPipeline(Pipeline):
         
         slat = self.sample_slat(
             cond, coords, slat_sampler_params,
+            verbose=False,
             progress_callback=slat_progress_callback
         )
         slat_time = time.time() - slat_start
@@ -449,7 +452,7 @@ class TrellisImageTo3DPipeline(Pipeline):
         format_summary = "\n          ".join([f"- {fmt}: {t:.2f}s ({(t/total_time)*100:.1f}%)" 
                                             for fmt, t in format_times.items()])
 
-        logger.info(f"""Pipeline timing breakdown:
+        logger.debug(f"""Pipeline timing breakdown:
             Preprocess & Conditioning: {preprocess_time:.2f}s ({(preprocess_time/total_time)*100:.1f}%)
             Sparse Structure: {structure_time:.2f}s ({(structure_time/total_time)*100:.1f}%)
             SLAT Sampling: {slat_time:.2f}s ({(slat_time/total_time)*100:.1f}%)

@@ -40,7 +40,7 @@ class GCSProvider(StorageProvider):
         blob.upload_from_filename(local_path)
         return self.get_url(remote_path)
         
-    def get_url(self, remote_path: str, expires_in: int = 3600) -> str:
+    def get_url(self, remote_path: str, expires_in: int = 60) -> str:
         blob = self.bucket.blob(remote_path)
         url = blob.generate_signed_url(
             version="v4",

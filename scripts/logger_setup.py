@@ -12,7 +12,7 @@ def setup_logging():
     
     # Create console handler with a higher log level
     console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.DEBUG)
+    console_handler.setLevel(logging.INFO)
     
     # Create file handler which logs even debug messages
     file_handler = logging.FileHandler('trellis-api.log')

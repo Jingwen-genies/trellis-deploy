@@ -540,8 +540,9 @@ def to_glb(
     texture_size: int = 1024,
     debug: bool = False,
     verbose: bool = True,
+    use_vertex_colors: bool = False,
     progress_callback: Optional[Callable[[float], None]] = None,
-    use_vertex_colors: bool = False
+
 ) -> trimesh.Trimesh:
     """
     Convert a generated asset to a glb file.
@@ -603,12 +604,7 @@ def to_glb(
     masks = [np.any(observation > 0, axis=-1) for observation in observations]
     extrinsics = [extrinsics[i].cpu().numpy() for i in range(len(extrinsics))]
     intrinsics = [intrinsics[i].cpu().numpy() for i in range(len(intrinsics))]
-
-    def texture_progress_callback(progress):
-        # Map texture baking progress (0-100) to overall progress (50-90)
-        overall_progress = 50 + (progress * 0.4)
-        update_progress(overall_progress)
-
+    
     texture = bake_texture(
         vertices,
         faces,
@@ -621,7 +617,7 @@ def to_glb(
         mode="opt",
         lambda_tv=0.01,
         verbose=verbose,
-        progress_callback=texture_progress_callback
+        progress_callback=lambda p: update_progress(50 + (p * 0.4))  # Map 0-100 to 50-90
     )
     update_progress(90)  # Texture baking done
 
