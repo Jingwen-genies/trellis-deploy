@@ -193,6 +193,27 @@ TRELLIS models and the majority of the code are licensed under the [MIT License]
 
 
 
+## Deployment
+built docker image 
+```
+docker build -t trellis-api .
+```
+
+create an `.env` file with your AWS credentials
+```
+AWS_ACCESS_KEY_ID=your_access_key
+AWS_SECRET_ACCESS_KEY=your_secret_key
+```
+
+# With mounted config and environment variables
+```
+docker run --gpus all \
+    -p 5000:5000 \
+    -v $(pwd)/config.yaml:/app/config.yaml \
+    --env-file .env \
+    --restart unless-stopped \
+    trellis-api
+```
 
 <!-- Citation -->
 ## 📜 Citation

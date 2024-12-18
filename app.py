@@ -17,6 +17,10 @@ from scripts.logger_setup import setup_logging
 import requests
 from urllib.parse import urlparse
 from botocore.exceptions import ClientError
+from queue import Queue, Empty
+from concurrent.futures import ThreadPoolExecutor
+import threading
+from datetime import datetime
 
 # Initialize logger
 logger = setup_logging()
@@ -93,11 +97,84 @@ class TrellisModel:
 
 class TaskManager:
     """Task management class"""
-    def __init__(self, config: TrellisConfig, model: TrellisModel):
+    def __init__(self, config: TrellisConfig, model: TrellisModel, max_concurrent_tasks=1):
         self.config = config
         self.model = model
         self.tasks = {}  # Store task status
+        self.task_queue = Queue()  # Initialize task queue
+        self.max_concurrent_tasks = max_concurrent_tasks
+        self.thread_pool = ThreadPoolExecutor(max_workers=max_concurrent_tasks)
+        self.active_tasks = 0  # Track number of currently running tasks
+        self.tasks_lock = threading.Lock()  # Single lock for tasks dictionary updates
         
+        # Start worker thread
+        self.worker_thread = Thread(target=self._process_queue, daemon=True)
+        logger.info(f"TaskManager initialized with max_concurrent_tasks: {max_concurrent_tasks}")
+        self.worker_thread.start()
+        logger.info("Task queue worker thread started")
+
+    def _update_queue_positions(self):
+        """Update queue positions for all queued tasks"""
+        queued_tasks = []
+        # We're already under tasks_lock when this is called
+        for task_id, task in self.tasks.items():
+            if task.get('status') == 'queued' and 'created_at' in task:
+                queued_tasks.append((task_id, task['created_at']))
+        
+        # Sort by creation time
+        queued_tasks.sort(key=lambda x: x[1])
+        
+        # Update queue positions
+        for position, (task_id, _) in enumerate(queued_tasks):
+            self.tasks[task_id]['queue_position'] = position
+
+    def _process_queue(self):
+        """Background worker to process tasks from the queue"""
+        while True:
+            try:
+                # Check if we can process more tasks
+                can_process = False
+                with self.tasks_lock:
+                    if self.active_tasks < self.max_concurrent_tasks:
+                        can_process = True
+                
+                if not can_process:
+                    time.sleep(0.5)  # Wait before checking again
+                    continue
+
+                try:
+                    # Non-blocking get with timeout
+                    task = self.task_queue.get(timeout=1)
+                except Empty:
+                    continue
+
+                # Process the task
+                with self.tasks_lock:
+                    self.active_tasks += 1
+                    if task['task_id'] in self.tasks:
+                        self.tasks[task['task_id']]['status'] = 'processing'
+                        self._update_queue_positions()
+
+                # Submit task to thread pool
+                future = self.thread_pool.submit(
+                    self.process_task,
+                    task['task_id'],
+                    task['image_path'],
+                    task['params']
+                )
+
+                def task_done_callback(future):
+                    with self.tasks_lock:
+                        self.active_tasks = max(0, self.active_tasks - 1)
+                        self._update_queue_positions()
+                    self.task_queue.task_done()
+
+                future.add_done_callback(task_done_callback)
+
+            except Exception as e:
+                logger.error(f"Error in queue processing: {str(e)}", exc_info=True)
+                time.sleep(0.1)
+
     def get_task_dir(self, task_id: str) -> str:
         """Get task-specific directory and create if it doesn't exist"""
         task_dir = os.path.join(self.config.TASKS_DIR, task_id)
@@ -162,6 +239,7 @@ class TaskManager:
             outputs = self.model.process_image(image, params, progress_callback=model_progress_callback)
             model_time = time.time() - model_start
             logger.debug(f"Phase 2 (Model Processing) took {model_time:.2f}s")
+            self.tasks[task_id]['progress'] = 35
             
             # Phase 3: Post-processing (35-100%)
             post_start = time.time()
@@ -245,15 +323,30 @@ class TaskManager:
                 shutil.rmtree(task_dir)
                 logger.debug(f"Task {task_id}: Cleaned up task directory after failure")
                 
-    def create_task(self, file_token: str, params: dict) -> str:
-        """Create a new task"""
+    def create_task(self, file_token: str, download_path: str, params: dict) -> str:
+        """Create a new task and add it to queue"""
         task_id = str(uuid.uuid4())
-        self.tasks[task_id] = {
-            'status': 'pending',
-            'progress': 0,
-            'created_at': time.time(),
+        logger.info(f"Creating new task {task_id}")
+        
+        with self.tasks_lock:
+            queue_size = self.task_queue.qsize()
+            self.tasks[task_id] = {
+                'status': 'queued',
+                'progress': 0,
+                'created_at': time.time(),
+                'params': params,
+                'queue_position': queue_size,
+            }
+            
+        # Add task to queue (no lock needed for queue operations)
+        task_data = {
+            'task_id': task_id,
+            'image_path': download_path,
             'params': params
         }
+        self.task_queue.put(task_data)
+        
+        logger.info(f"Task {task_id} added to queue. Active tasks: {self.active_tasks}/{self.max_concurrent_tasks}, Queued: {queue_size}")
         return task_id
         
     def is_url_expired(self, url: str) -> bool:
@@ -265,54 +358,69 @@ class TaskManager:
             return True
 
     def get_task_status(self, task_id: str) -> dict:
-        """Get task status with proper mapping"""
+        """Get task status with queue information"""
         if task_id not in self.tasks:
             return None
             
-        status_data = self.tasks[task_id].copy()
-        status_mapping = {
-            'pending': 'queued',
-            'processing': 'running',
-            'completed': 'success',
-            'failed': 'failed'
-        }
-
-        # generate a new presigned url for the model if the task is completed and the model url is expired
-        if status_data['status'] == 'completed':
-            try:
-                model_url = status_data["output"].get("model")
-                
-                # Check if we need to generate a new URL
-                need_new_url = (
-                    not model_url or 
-                    (isinstance(model_url, str) and self.is_url_expired(model_url))
-                )
-                if need_new_url:
-                    storage_url = f"{self.config.storage_output_dir}/{task_id}/model.glb"
-                    status_data['output']['model'] = self.config.storage.get_url(storage_url)
-                    logger.debug(f"Generated new presigned URL for task {task_id}")
-            except Exception as e:
-                logger.error(f"Failed to generate presigned URL for task {task_id}: {str(e)}")
-                # Keep the existing URL if we fail to generate a new one
-        
-        return {
-            'message': f"Task is {status_mapping.get(status_data['status'], 'unknown')}",
-            'task_id': task_id,
-            'type': 'image_to_model',
-            'status': status_mapping.get(status_data['status'], 'unknown'),
-            'input': status_data['params'],
-            'output': status_data.get('output', {}),
-            'progress': status_data['progress'],
-            'create_time': int(status_data['created_at']),
-            'error': status_data.get('error') if status_data['status'] == 'failed' else None
-        }
+        with self.tasks_lock:
+            status_data = self.tasks[task_id].copy()
+            
+            # Update queue information
+            queue_info = {
+                'active_tasks': self.active_tasks,
+                'max_concurrent_tasks': self.max_concurrent_tasks,
+                'tasks_in_queue': self.task_queue.qsize(),
+                'queue_position': status_data.get('queue_position', 0) if status_data['status'] == 'queued' else 0
+            }
+            
+            status_mapping = {
+                'queued': 'queued',
+                'processing': 'running',
+                'completed': 'success',
+                'failed': 'failed'
+            }
+            
+            # Handle model URL regeneration
+            if status_data['status'] == 'completed':
+                try:
+                    model_url = status_data["output"].get("model")
+                    
+                    # Check if we need to generate a new URL
+                    need_new_url = (
+                        not model_url or 
+                        (isinstance(model_url, str) and self.is_url_expired(model_url))
+                    )
+                    if need_new_url:
+                        storage_url = f"{self.config.storage_output_dir}/{task_id}/model.glb"
+                        status_data['output']['model'] = self.config.storage.get_url(storage_url)
+                        logger.debug(f"Generated new presigned URL for task {task_id}")
+                except Exception as e:
+                    logger.error(f"Failed to generate presigned URL for task {task_id}: {str(e)}")
+            
+            return {
+                'message': f"Task is {status_mapping.get(status_data['status'], 'unknown')}",
+                'task_id': task_id,
+                'type': 'image_to_model',
+                'status': status_mapping.get(status_data['status'], 'unknown'),
+                'input': status_data['params'],
+                'output': status_data.get('output', {}),
+                'progress': status_data.get('progress', 0),
+                'create_time': int(status_data['created_at']),
+                'error': status_data.get('error') if status_data['status'] == 'failed' else None,
+                'queue_info': queue_info
+            }
 
 class TrellisAPI:
     """Main API class"""
     def __init__(self):
         self.config = TrellisConfig()
         self.model = TrellisModel()
-        self.task_manager = TaskManager(self.config, self.model)
+        # Initialize TaskManager with maximum concurrent tasks
+        self.task_manager = TaskManager(
+            self.config, 
+            self.model,
+            max_concurrent_tasks=2  # Adjust based on your GPU/CPU resources
+        )
         self.app = Flask(__name__)
         self.setup_routes()
         
@@ -321,6 +429,7 @@ class TrellisAPI:
         self.app.route('/trellis/upload', methods=['POST'])(self.upload_image)
         self.app.route('/trellis/task', methods=['POST'])(self.create_task)
         self.app.route('/trellis/task/<task_id>', methods=['GET'])(self.get_task_status)
+        self.app.route('/ping', methods=['GET'])(self.ping)
         
     def validate_image(self, file) -> tuple[Image.Image, str, int]:
         """Validate image file and return image object, format, and size"""
@@ -472,7 +581,7 @@ class TrellisAPI:
                 logger.warning(str(e))
                 return jsonify({
                     'code': 2002,
-                    'data': {'message': str(e)}
+                    'data': {'message': f"Error in task parameters: {str(e)}"}
                 }), 400
             
             # Download input image
@@ -490,20 +599,15 @@ class TrellisAPI:
                     'data': {'message': f'Failed to retrieve image: {str(e)}'}
                 }), 404
             
-            # Create and start task
-            task_id = self.task_manager.create_task(file_token, params)
-            thread = Thread(
-                target=self.task_manager.process_task,
-                args=(task_id, download_path, params)
-            )
-            thread.start()
+            # Create task and add it to queue
+            task_id = self.task_manager.create_task(file_token, download_path, params)
             
             return jsonify({
                 'code': 0,
                 'data': {
                     'message': 'Task created successfully',
                     'task_id': task_id,
-                    'status': 'pending',
+                    'status': 'queued',  # Changed from 'pending' to 'queued'
                     'params': params
                 }
             }), 200
@@ -532,6 +636,16 @@ class TrellisAPI:
             'code': 0,
             'data': status_data
         }), 200
+        
+    def ping(self):
+        return jsonify({
+            "code": 0,
+            "message": "pong",
+            "data": {
+                "status": "healthy",
+                "timestamp": datetime.now().isoformat()
+            }
+        })
         
     def run(self, host='0.0.0.0', port=5000):
         """Run the API server"""

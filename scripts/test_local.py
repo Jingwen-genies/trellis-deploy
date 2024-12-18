@@ -5,15 +5,22 @@ import time
 # import boto3
 from urllib.parse import urlparse
 
-url_upload = "http://localhost:5000/trellis/upload"
-url_task = "http://localhost:5000/trellis/task"
-url_status = f"http://localhost:5000/trellis/task/{{}}"
 
+API_HOST = os.getenv('API_HOST', 'localhost')
+url_upload = f"http://{API_HOST}:5000/trellis/upload"
+url_task = f"http://{API_HOST}:5000/trellis/task"
+url_status = f"http://{API_HOST}:5000/trellis/task/{{}}"
+
+# Add environment variable to control storage mode
+os.environ['STORAGE_MODE'] = 'local'  # Options: 'local' or 's3'
 
 def upload_image(file_path):
     """Upload image to API and return image token"""
     files = {'file': open(file_path, 'rb')}
-    response = requests.post(url_upload, files=files)
+    headers = {
+        'X-Storage-Mode': os.getenv('STORAGE_MODE', 'local')  # Tell the API to use local storage
+    }
+    response = requests.post(url_upload, files=files, headers=headers)
     response_data = response.json()
     if response.status_code != 200 or response_data.get("code") != 0:
         raise Exception(f"Image upload failed: {response_data}")
@@ -122,25 +129,15 @@ def download_model(url, task_id, out_file_path):
 if __name__ == "__main__":
     # Check AWS environment variables
     import os
-    print("AWS Credentials Status:")
-    print(f"Access Key: {'Set' if os.getenv('AWS_ACCESS_KEY_ID') else 'Not Set'}")
-    print(f"Secret Key: {'Set' if os.getenv('AWS_SECRET_ACCESS_KEY') else 'Not Set'}")
-    print(f"Region: {os.getenv('AWS_REGION') or 'Not Set'}")
-    # required_env_vars = ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY']
-    # missing_vars = [var for var in required_env_vars if not os.getenv(var)]
-    # if missing_vars:
-    #     raise Exception(f"Missing required environment variables: {', '.join(missing_vars)}")
-
-    # New test script:
     print("\n=== Starting Full Test Flow ===")
     try:
-        # # 1. Upload image
-        # image_path = "./TRELLIS/assets/example_image/T.png"  # Adjust path as needed
-        # print(f"\n1. Uploading image: {image_path}")
-        # image_token = upload_image(image_path)
-        # print(f"✓ Image uploaded successfully. Token: {image_token}")
+        # 1. Upload image
+        image_path = "./TRELLIS/assets/example_image/T.png"  # Adjust path as needed
+        print(f"\n1. Uploading image: {image_path}")
+        image_token = upload_image(image_path)
+        print(f"✓ Image uploaded successfully. Token: {image_token}")
 
-        image_token = '381c81fd-c766-480b-83ee-70c0ecfe2788'
+        # image_token = '381c81fd-c766-480b-83ee-70c0ecfe2788'
 
         # 2. Create task
         print("\n2. Creating task for 3D conversion")

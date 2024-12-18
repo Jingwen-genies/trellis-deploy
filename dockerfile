@@ -1,4 +1,4 @@
-FROM pytorch/pytorch:2.4.0-cuda11.8-cudnn9-runtime
+FROM pytorch/pytorch:2.4.0-cuda11.8-cudnn9-devel
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
@@ -8,24 +8,37 @@ RUN apt-get update && apt-get install -y \
     libtbb-dev \
     && rm -rf /var/lib/apt/lists/*
 
-
 # Set environment variables
 ENV CUDA_VERSION=11.8
 ENV NVIDIA_VISIBLE_DEVICES=all
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+ENV CUDA_HOME=/usr/local/cuda
+ENV PATH=${CUDA_HOME}/bin:${PATH}
+ENV LD_LIBRARY_PATH=${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}
+ENV TORCH_CUDA_ARCH_LIST="7.0;7.5;8.0;8.6+PTX"
+
+WORKDIR /app
+
+# Copy TRELLIS package first
+COPY TRELLIS /app/TRELLIS
+
+# Copy API code and scripts
+COPY scripts /app/scripts
+COPY app.py config.yaml requirements.txt ./
+
 
 # Install Pytorch
-RUN pip install --no-cache-dir torch==2.4.0 torchvision==0.19.0 --extra-index-url https://download.pytorch.org/whl/cu118 && \
+RUN pip install --no-cache-dir torch==2.4.0 torchvision==0.19.0 --extra-index-url https://download.pytorch.org/whl/cu118
 
 # Install other Python dependencies
-COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install git+https://github.com/EasternJournalist/utils3d.git@9a4eb15e4021b67b12c460c7057d642626897ec8
+
 
 # Install CUDA-specific packages
-RUN pip install --no-cache-dir xformers==0.0.27.post2 --index-url https://download.pytorch.org/whl/cu118 && \
-    pip install --no-cache-dir flash-attn && \
-    pip install --no-cache-dir spconv-cu118 && \
-    pip install --no-cache-dir "tbb>=2021.6.0"
+RUN pip install --no-cache-dir xformers==0.0.27.post2 --index-url https://download.pytorch.org/whl/cu118
+RUN pip install --no-cache-dir flash-attn
+RUN pip install --no-cache-dir spconv-cu118
 
 # Install Kaolin
 RUN pip install --no-cache-dir kaolin -f https://nvidia-kaolin.s3.us-east-2.amazonaws.com/torch-2.4.0_cu118.html
@@ -37,7 +50,8 @@ RUN git clone https://github.com/NVlabs/nvdiffrast.git /tmp/nvdiffrast && \
 
 # Install DIFFOCTREERAST
 RUN git clone --recurse-submodules https://github.com/JeffreyXiang/diffoctreerast.git /tmp/diffoctreerast && \
-    pip install /tmp/diffoctreerast && \
+    cd /tmp/diffoctreerast && \
+    FORCE_CUDA=1 pip install . && \
     rm -rf /tmp/diffoctreerast
 
 # Install MIP-Splatting
@@ -45,9 +59,8 @@ RUN git clone https://github.com/autonomousvision/mip-splatting.git /tmp/mip-spl
     pip install /tmp/mip-splatting/submodules/diff-gaussian-rasterization/ && \
     rm -rf /tmp/mip-splatting
 
-
 # Make port 8000 available to the world outside this container
-EXPOSE 8000
+EXPOSE 5000
 
 # Command to run the application
-CMD ["gunicorn", "--bind", "0.0.0.0:8000", "--timeout", "300", "app:__hug_wsgi__"]
+CMD ["python", "app.py"]
