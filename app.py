@@ -32,15 +32,26 @@ warnings.filterwarnings("ignore", category=UserWarning, module="dinov2.layers")
 class TrellisConfig:
     """Configuration management class"""
     def __init__(self):
-        self.TEMP_DIR = tempfile.gettempdir()
-        self.IMAGES_DIR = os.path.join(self.TEMP_DIR, "input_images")
-        self.TASKS_DIR = os.path.join(self.TEMP_DIR, "output_tasks")
-        self.MAX_SEED = 2**32 - 1
-        
         # Load config file
         config = load_config("./config.yaml")
-        self.storage_input_dir = config["storage"]['prefix'] + "input_images"
-        self.storage_output_dir = config["storage"]['prefix'] + "output_tasks"
+        
+        # Task processing settings
+        self.max_concurrent_tasks = config["task"]["max_concurrent_tasks"]
+        self.queue_poll_interval = config["task"]["queue_poll_interval"]
+        self.queue_timeout = config["task"]["queue_timeout"]
+        
+        # Model defaults
+        self.model_defaults = config["model"]
+        
+        # System paths
+        self.TEMP_DIR = config["paths"].get("temp_dir", tempfile.gettempdir())
+        self.IMAGES_DIR = os.path.join(self.TEMP_DIR, config["paths"]["images_dir"])
+        self.TASKS_DIR = os.path.join(self.TEMP_DIR, config["paths"]["tasks_dir"])
+        self.MAX_SEED = 2**32 - 1
+        
+        # Storage settings
+        self.storage_input_dir = config["storage"]['prefix'] + config["paths"]["images_dir"]
+        self.storage_output_dir = config["storage"]['prefix'] + config["paths"]["tasks_dir"]
         
         # Create necessary directories
         os.makedirs(self.IMAGES_DIR, exist_ok=True)
@@ -97,19 +108,19 @@ class TrellisModel:
 
 class TaskManager:
     """Task management class"""
-    def __init__(self, config: TrellisConfig, model: TrellisModel, max_concurrent_tasks=1):
+    def __init__(self, config: TrellisConfig, model: TrellisModel):
         self.config = config
         self.model = model
-        self.tasks = {}  # Store task status
-        self.task_queue = Queue()  # Initialize task queue
-        self.max_concurrent_tasks = max_concurrent_tasks
-        self.thread_pool = ThreadPoolExecutor(max_workers=max_concurrent_tasks)
+        self.tasks = {}
+        self.task_queue = Queue()
+        self.max_concurrent_tasks = config.max_concurrent_tasks
+        self.thread_pool = ThreadPoolExecutor(max_workers=config.max_concurrent_tasks)
         self.active_tasks = 0  # Track number of currently running tasks
         self.tasks_lock = threading.Lock()  # Single lock for tasks dictionary updates
         
         # Start worker thread
         self.worker_thread = Thread(target=self._process_queue, daemon=True)
-        logger.info(f"TaskManager initialized with max_concurrent_tasks: {max_concurrent_tasks}")
+        logger.info(f"TaskManager initialized with max_concurrent_tasks: {config.max_concurrent_tasks}")
         self.worker_thread.start()
         logger.info("Task queue worker thread started")
 
@@ -139,12 +150,12 @@ class TaskManager:
                         can_process = True
                 
                 if not can_process:
-                    time.sleep(0.5)  # Wait before checking again
+                    time.sleep(self.config.queue_poll_interval)  # Wait before checking again
                     continue
 
                 try:
-                    # Non-blocking get with timeout
-                    task = self.task_queue.get(timeout=1)
+                    # Non-blocking get with configured timeout
+                    task = self.task_queue.get(timeout=self.config.queue_timeout)
                 except Empty:
                     continue
 
@@ -419,7 +430,6 @@ class TrellisAPI:
         self.task_manager = TaskManager(
             self.config, 
             self.model,
-            max_concurrent_tasks=2  # Adjust based on your GPU/CPU resources
         )
         self.app = Flask(__name__)
         self.setup_routes()
@@ -531,29 +541,38 @@ class TrellisAPI:
         if geometry_seed < 0 or geometry_seed > self.config.MAX_SEED:
             raise ValueError(f"geometry_seed must be between 0 and {self.config.MAX_SEED}")
             
+        # Get model defaults from config
+        model_defaults = self.config.model_defaults
+        
         # Validate mesh processing parameters
-        simplify = float(data.get('simplify', 0.95))
+        simplify = float(data.get('simplify', model_defaults['mesh']['default_simplify']))
         if not 0 <= simplify <= 1:
             raise ValueError("simplify must be between 0 and 1")
         
-        texture_size = int(data.get('texture_size', 1024))
-        valid_texture_sizes = [512, 1024, 2048]
+        texture_size = int(data.get('texture_size', model_defaults['mesh']['default_texture_size']))
+        valid_texture_sizes = model_defaults['mesh']['valid_texture_sizes']
         if texture_size not in valid_texture_sizes:
             raise ValueError(f"texture_size must be one of: {valid_texture_sizes}")
 
-        sparse_structure_steps = int(data.get('sparse_structure_steps', 12))
+        # Validate sparse structure parameters
+        sparse_structure_steps = int(data.get('sparse_structure_steps', 
+            model_defaults['sparse_structure']['default_steps']))
         if sparse_structure_steps < 1:
             raise ValueError("sparse_structure_steps must be positive")
 
-        sparse_structure_strength = float(data.get('sparse_structure_strength', 7.5))
+        sparse_structure_strength = float(data.get('sparse_structure_strength', 
+            model_defaults['sparse_structure']['default_strength']))
         if sparse_structure_strength <= 0:
             raise ValueError("sparse_structure_strength must be positive")
             
-        slat_steps = int(data.get('slat_steps', 12))
+        # Validate SLAT parameters
+        slat_steps = int(data.get('slat_steps', 
+            model_defaults['slat']['default_steps']))
         if slat_steps < 1:
             raise ValueError("slat_steps must be positive")
             
-        slat_strength = float(data.get('slat_strength', 3.0))
+        slat_strength = float(data.get('slat_strength', 
+            model_defaults['slat']['default_strength']))
         if slat_strength <= 0:
             raise ValueError("slat_strength must be positive")
             
@@ -561,10 +580,10 @@ class TrellisAPI:
             'file_token': file_token,
             'model_version': data.get('model_version', 'default'),
             'geometry_seed': geometry_seed,
-            'sparse_structure_steps': int(data.get('sparse_structure_steps', 20)),
-            'sparse_structure_strength': float(data.get('sparse_structure_strength', 7.5)),
-            'slat_steps': int(data.get('slat_steps', 20)),
-            'slat_strength': float(data.get('slat_strength', 3.0)),
+            'sparse_structure_steps': sparse_structure_steps,
+            'sparse_structure_strength': sparse_structure_strength,
+            'slat_steps': slat_steps,
+            'slat_strength': slat_strength,
             'simplify': simplify,
             'texture_size': texture_size
         }

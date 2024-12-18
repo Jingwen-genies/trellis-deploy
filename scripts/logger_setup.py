@@ -1,33 +1,27 @@
 import logging
+from scripts.config import load_config
 
 def setup_logging():
-    """Setup logging configuration"""
-    # Create logger
-    logger = logging.getLogger('trellis-api')
-    logger.setLevel(logging.DEBUG)  # Set the base log level
+    """Setup logging configuration from config file"""
+    config = load_config("./config.yaml")
+    logging_config = config.get("logging", {})
     
-    # Avoid duplicate handlers if this function is called multiple times
-    if logger.hasHandlers():
-        logger.handlers.clear()
+    # Set log level from config
+    level = logging_config.get("level", "INFO")
+    level = getattr(logging, level.upper())
     
-    # Create console handler with a higher log level
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.INFO)
+    # Set log format from config
+    log_format = logging_config.get("format", 
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s")
     
-    # Create file handler which logs even debug messages
-    file_handler = logging.FileHandler('trellis-api.log')
-    file_handler.setLevel(logging.DEBUG)
-    
-    # Create formatter and add it to the handlers
-    formatter = logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
+    # Configure logging
+    logging.basicConfig(
+        level=level,
+        format=log_format
     )
-    console_handler.setFormatter(formatter)
-    file_handler.setFormatter(formatter)
     
-    # Add the handlers to the logger
-    logger.addHandler(console_handler)
-    logger.addHandler(file_handler)
+    # Create and return logger
+    logger = logging.getLogger('trellis-api')
+    logger.debug("Logging configured with level: %s", level)
     
     return logger
