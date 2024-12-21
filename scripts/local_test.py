@@ -134,14 +134,15 @@ if __name__ == "__main__":
     # New test script:
     print("\n=== Starting Full Test Flow ===")
     try:
-        # # 1. Upload image
-        # image_path = "./TRELLIS/assets/example_image/T.png"  # Adjust path as needed
-        # print(f"\n1. Uploading image: {image_path}")
-        # image_token = upload_image(image_path)
-        # print(f"✓ Image uploaded successfully. Token: {image_token}")
+        # 1. Upload image
+        image_path = "./TRELLIS/assets/example_image/T.png"  # Adjust path as needed
+        print(f"\n1. Uploading image: {image_path}")
+        image_token = upload_image(image_path)
+        print(f"✓ Image uploaded successfully. Token: {image_token}")
 
-        image_token = '381c81fd-c766-480b-83ee-70c0ecfe2788'
+        # image_token = '381c81fd-c766-480b-83ee-70c0ecfe2788'
 
+        start_time = time.time()
         # 2. Create task
         print("\n2. Creating task for 3D conversion")
         task_id = submit_image_to_model(
@@ -178,12 +179,13 @@ if __name__ == "__main__":
                 raise Exception(f"Task processing failed: {error}")
             
             time.sleep(2)  # Wait 0.5 seconds before next check
-
-        time.sleep(65)
+        
+        
         # 4. Download result
         print("\n4. Downloading result")
         if 'model' in data.get('output', {}):
             url = data['output']['model']
+            print(f"time used for task: {time.time() - start_time:.2f} seconds")
             output_path = Path("./result.glb")
             download_model(url, task_id, output_path)
             print(f"✓ Model downloaded successfully to: {output_path.absolute()}")

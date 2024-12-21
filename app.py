@@ -17,6 +17,12 @@ from scripts.logger_setup import setup_logging
 import requests
 from urllib.parse import urlparse
 from botocore.exceptions import ClientError
+from dotenv import load_dotenv
+
+# Load environment variables
+# Try to load from .env if exists, but don't fail if it doesn't
+if os.path.exists('.env'):
+    load_dotenv()
 
 # Initialize logger
 logger = setup_logging()
